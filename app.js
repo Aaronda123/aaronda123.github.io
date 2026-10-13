@@ -112,6 +112,7 @@ let historyPushed = false;                // eigener Verlaufseintrag für ein of
 let ignorePops = 0;
 let serviceLogged = false;
 let micUnlock = null;                     // Freischalt-Versuch des Mikrofons aus dem laufenden Tippen (robustness-1)
+let micRetryFailed = false;               // im Tippen erneut verweigert: bis zur Rückkehr auf die Seite gleich die Tastatur
 let wakeGen = 0;                          // ++ bei jedem Ein-/Ausschalten des Weckworts (robustness-2)
 let imagePausedBy = null;                 // die Zuhör-Runde, die die Bild-Zeit angehalten hat (robustness-3)
 let mutedTurn = 0;                        // Runde, die beim Wechsel in den Hintergrund lief: spricht nicht weiter (robustness-9)
@@ -121,6 +122,8 @@ let importPending = null;                 // Setup-Link, der erst nach Bestätig
 const S = () => store.settings();
 const A = () => store.anrede();
 const L = (key, vars = {}) => intents.line(key, { A: A(), ...vars });
+// Hinweis auf dem Bildschirm: am Rechner mit Maus „Klicken …“ statt „Tippen …“, sofern es die Variante gibt (visual-ux-13)
+const LM = (key, vars = {}) => L(MOUSE && intents.LINES?.[`${key}Mouse`] != null ? `${key}Mouse` : key, vars);
 const pad2 = (n) => String(n).padStart(2, "0");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1065,7 +1068,7 @@ function removeUnlockListeners() {
 
 function showUnlockCatcher(answer = false) {
   awakeCatcher = false;
-  hud.showUnlock(L(answer ? "unlockAnswer" : "unlockStart"));
+  hud.showUnlock(LM(answer ? "unlockAnswer" : "unlockStart"));
   installUnlockListeners();
 }
 
@@ -1076,7 +1079,7 @@ function maybeAwakeCatcher() {
   if (safe(() => hud.isUnlockShown(), false)) return;          // der normale Fänger tut es mit
   awakeCatcherShown = true;
   awakeCatcher = true;
-  hud.showUnlock(L("unlockAwake"));
+  hud.showUnlock(LM("unlockAwake"));
   installUnlockListeners();
 }
 
@@ -1106,13 +1109,17 @@ function onUnlockGesture() {
   // synchroner Teil im Tippen: Ton und Spracherkennung freischalten
   const a = locked.audio || !voice.isUnlocked() ? voice.unlockInGesture() : Promise.resolve(true);
   const native = safe(() => ears.capabilities().native, false);
-  // dauerhaft verweigert (Berechtigung „denied“): nicht bei jedem Tippen neu fragen
-  const tryMic = native && (locked.mic || S().wakeWord) && safe(() => ears.micPermission(), null) !== "denied";
-  const m = tryMic ? ears.unlockInGesture() : Promise.resolve(!locked.mic);
-  micUnlock = m.catch(() => false);
-  Promise.all([a.catch(() => false), micUnlock]).then(async ([audioOk, micOk]) => {
-    // Mikrofon weiter gesperrt: das nächste Tippen versucht es wieder (Erlaubnis später erteilt, robustness-1)
+  // dauerhaft verweigert (Berechtigung „denied“) oder in diesem Seitenbesuch schon im Tippen erneut abgelehnt: nicht bei
+  // jedem Tippen neu fragen – sonst öffnet das Antippen der Kugel nie mehr die Tastatur (robustness-1)
+  const tryMic = native && (locked.mic || S().wakeWord) && safe(() => ears.micPermission(), null) !== "denied"
+    && !(micRetryFailed && safe(() => ears.blockReason(), null));
+  const m = (tryMic ? ears.unlockInGesture() : Promise.resolve(!locked.mic)).catch(() => false);
+  micUnlock = tryMic ? m : null;
+  Promise.all([a.catch(() => false), m]).then(async ([audioOk, micOk]) => {
+    // Mikrofon weiter gesperrt: die Listener bleiben; nach der Rückkehr auf die Seite (Erlaubnis inzwischen in den
+    // Einstellungen erteilt?) versucht das nächste Tippen es wieder (robustness-1)
     const stillBlocked = !micOk && !!safe(() => ears.blockReason(), null);
+    if (tryMic) micRetryFailed = stillBlocked;
     locked = { audio: !audioOk, mic: stillBlocked };
     if (!micOk && (stillBlocked || tryMic)) {                 // Mikrofon verweigert: Jarvis bleibt per Tippen nutzbar
       logMicDenied();
@@ -1160,7 +1167,7 @@ function onUnlockGesture() {
     // "answer": voice spielt die wartenden Sätze nach dem Freischalten selbst ab
   }).catch((e) => report("unlock", e)).finally(() => {
     unlocking = false;
-    micUnlock = null;
+    if (micUnlock === m) micUnlock = null;
     if (booted) applyKeepAwake();                             // Sperre aus dem Tippen nur behalten, wenn gelauscht wird
   });
 }
@@ -1532,6 +1539,7 @@ function onVisibility() {
   }
   const away = hiddenAt ? Date.now() - hiddenAt : 0;
   hiddenAt = 0;
+  micRetryFailed = false;                                     // vielleicht in den Einstellungen erlaubt: wieder versuchen
   hud.setPaused(mode !== "shown");
   tick();
   applyKeepAwake();
@@ -1621,7 +1629,7 @@ function continueBoot(reason) {
     log("system", "Hintergrund-Modus: lausche unsichtbar auf „Jarvis“.");
   } else {
     const wakeOk = wakeAvailable();                           // Firefox, Mikrofon gesperrt: kein „Sag Hey Jarvis“
-    setState("idle", L(wakeOk ? "idleBoot" : "idleBootNoWake"));
+    setState("idle", LM(wakeOk ? "idleBoot" : "idleBootNoWake"));
     log("system", L(wakeOk ? "readyLog" : "readyLogNoWake"));
     // D7; nicht, solange die Frage „Einstellungen übernehmen?“ offen ist
     if (S().greeting && !importPending) sayPresence({ followUp: true }).catch((e) => report("greeting", e));

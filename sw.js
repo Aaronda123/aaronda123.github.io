@@ -15,7 +15,7 @@
 // langsamem Netz nach 3 s – startet Jarvis aus dem Cache. Anfragen an Claude, Gemini, Azure, Kurse, Wetter und
 // Wikipedia gehen nie über den Cache.
 
-const VERSION = "jarvis-v2-202610131723";
+const VERSION = "jarvis-v2-202610131839";
 const SHELL_CACHE = `shell-${VERSION}`;
 const STATIC_CACHE = `static-${VERSION}`;
 const KEEP_PREFIXES = ["jarvis-tts"];          // Stimmen-Cache von voice.js bleibt über Updates erhalten

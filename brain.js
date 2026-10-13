@@ -1585,6 +1585,13 @@ export async function ask(text, { spoken = true, signal, onChunk, onTier, onTool
     }
     if (me.ctl.signal.aborted) throw new BrainError("aborted", "abgebrochen", 0);
     const feeder = st.feeder;
+    // Ohne Text abgebrochen (Ausgabe-Grenze, Websuche nicht fertig): nicht „nicht an mich gerichtet“ (Schweigen), sondern
+    // eine Ansage – wie bei Gemini (robustness-6); leer mit end_turn bleibt das stille „nicht an Jarvis“
+    if (!st.refusal && !feeder.fullText && !feeder.actions.length && (st.stop === "max_tokens" || st.stop === "pause_turn")) {
+      const e = new BrainError("other", `Claude: ${st.stop}`, 0);
+      e.say = intents.line?.("err.gemini.cut", { A: store.anrede() }) || "";
+      throw e;
+    }
     const answer = st.raw.trim();
     if (!st.refusal && answer && job.conversation === conversation) store.appendTurn(job.userContent, answer);
     return {

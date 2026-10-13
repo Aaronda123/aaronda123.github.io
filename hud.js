@@ -25,6 +25,7 @@ const PLACEHOLDER_TYPE = "Frag Jarvis …";
 let PLACEHOLDER = PLACEHOLDER_WAKE;
 let wakeHintOn = true;
 const MODEL_HINT_MOUSE = "ZIEHEN: DREHEN · MAUSRAD: ZOOM · DOPPELKLICK: ZURÜCK";
+const HOTKEYS_MOUSE = "Kugel anklicken: zuhören / fertig · Doppelklick auf Schwarz: zurück";
 const PAGES = ["clock", "termine", "log", "konto", "system", "control"];
 const LOG_PAGE = 2;
 const SYSTEM_PAGE = 4;
@@ -128,9 +129,11 @@ export function init(callbacks = {}) {
   const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const tip = document.querySelector("#boot .boot-tip");
   if (tip) tip.hidden = !(ios && !standalone);
-  // Maus statt Finger (Rechner): Hinweis im 3D-Fenster passend (Mausrad, Doppelklick)
+  // Maus statt Finger (Rechner): Hinweise im 3D-Fenster und unter KOMMANDO passend (Mausrad, Klick, Doppelklick)
   const mouse = !!window.matchMedia?.("(pointer: fine)").matches && !window.matchMedia?.("(any-pointer: coarse)").matches;
   if (mouse && $("model3d-hint")) setText($("model3d-hint"), MODEL_HINT_MOUSE);
+  const hotkeys = document.querySelector("#p-control .hotkeys");
+  if (mouse && hotkeys) setText(hotkeys, HOTKEYS_MOUSE);
 
   if (window.Orb) {
     try {

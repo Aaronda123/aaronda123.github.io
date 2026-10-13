@@ -136,13 +136,14 @@ const WEEKDAYS = Array.isArray(intents.WEEKDAYS) && intents.WEEKDAYS.length === 
 
 /** §5.2 texts, used only when intents.line() is unavailable or cannot fill a key. */
 const FALLBACK_LINES = {
-  macOnly: "Das mache ich am Mac, {A}.",
-  macOnlyMusic: "Das mache ich am Mac, {A}. Ton und Musik regelst du am Gerät selbst.",
-  macOnlyWhatsApp: "WhatsApp lese ich dir am Mac vor, {A}.",
-  macOnlyMail: "Deine Mails mache ich am Mac, {A}.",
-  macOnlyApps: "Programme schließe ich am Mac, {A}.",
-  macOnlyHotspot: "Den Hotspot verbinde ich am Mac, {A}.",
-  macOnlyTeach: "Neue Fähigkeiten bringt mir Claude Code am Mac bei, {A}.",
+  // wie intents.js LINES: kein Verweis auf einen Mac-Jarvis, den Besucher nicht haben (visual-ux-6)
+  macOnly: "Das kann ich hier nicht, {A}.",
+  macOnlyMusic: "Das kann ich hier nicht, {A}. Ton und Musik regelst du am Gerät selbst.",
+  macOnlyWhatsApp: "WhatsApp vorlesen kann ich hier nicht, {A}.",
+  macOnlyMail: "Deine Mails kann ich hier nicht lesen, {A}.",
+  macOnlyApps: "Programme schließen kann ich hier nicht, {A}.",
+  macOnlyHotspot: "Den Hotspot kann ich hier nicht verbinden, {A}.",
+  macOnlyTeach: "Neue Fähigkeiten kann ich mir hier nicht selbst beibringen, {A}.",
   actionFailed: "Das hat leider nicht geklappt.",
   weatherNoData: "Ich komme gerade nicht an die Wetterdaten.",
   weatherNoPlace: "Den Ort {place} finde ich nicht.",

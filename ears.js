@@ -84,6 +84,8 @@ let netFails = 0;           // aufeinanderfolgende Durchgänge, die nur mit "net
 let nativeDead = false;     // für diesen Seitenaufruf unbrauchbar (Browser ohne Erkennungsdienst)
 let gate = null;            // Android: Pegel-Wächter zwischen zwei Erkennungen
 let gateFails = 0;          // Wächter konnte nicht laufen (z. B. Ton vor dem ersten Tippen gesperrt): länger warten
+let gateRetry = null;        // Neustart-Timer, den der Wächter mangels Ton-Freigabe gestellt hat
+let gateAudioHook = null;    // AudioContext, auf dessen Freigabe (erstes Tippen) der Wächter wartet
 let micPerm = null;         // Permissions API: "granted" | "denied" | "prompt" | null (unbekannt)
 let wState = "off";
 let lastEngine = null;
@@ -717,12 +719,16 @@ async function startGate() {
   const token = wakeToken;
   const g = { token, stream: null, src: null, an: null, buf: null, timer: 0, noise: [], thr: 0.02, loud: 0, startAt: 0, dead: false };
   gate = g;
-  const fallback = () => {
+  const fallback = (audioLocked = false) => {
     if (gate === g) gate = null;
     // ohne Wächter piept jeder Neustart: je öfter er nicht laufen kann, desto länger warten (robustness-13)
     gateFails++;
     const ms = Math.min(ANDROID_RETRY_MAX_MS, ANDROID_RETRY_MS * 2 ** Math.max(0, gateFails - 1));
-    if (!g.dead && token === wakeToken && canRunWake() && !cur) scheduleWake(ms);
+    if (!g.dead && token === wakeToken && canRunWake() && !cur) {
+      scheduleWake(ms);
+      gateRetry = restartTimer;
+      if (audioLocked) gateOnAudio(ctx);                // erstes Tippen gibt den Ton frei: dann gleich lautlos lauschen
+    }
   };
   const md = typeof navigator !== "undefined" ? navigator.mediaDevices : null;
   const ctx = audioCtx();
@@ -731,7 +737,7 @@ async function startGate() {
     try { await Promise.race([Promise.resolve(ctx.resume()).catch(() => {}), sleep(300)]); } catch { /* ignore */ }
   }
   if (g.dead) return;
-  if (ctx.state !== "running") { fallback(); return; }   // ohne Ton-Freigabe misst Web Audio nichts
+  if (ctx.state !== "running") { fallback(true); return; }   // ohne Ton-Freigabe misst Web Audio nichts
   let stream;
   try {
     stream = await md.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
@@ -752,6 +758,25 @@ async function startGate() {
   g.startAt = Date.now();
   gateFails = 0;
   g.timer = setInterval(() => gateTick(g), GATE_TICK_MS);
+}
+
+// Der Ton war gesperrt (Android-Tab vor dem ersten Tippen): sobald er frei ist, nicht erst den gestreckten Neustart
+// abwarten (bis 30 s taub), sondern sofort den lautlosen Wächter starten – ohne Piepen (robustness-13)
+function gateOnAudio(ctx) {
+  if (!ctx || gateAudioHook === ctx || typeof ctx.addEventListener !== "function") return;
+  gateAudioHook = ctx;
+  const onState = () => {
+    if (ctx.state !== "running") return;
+    try { ctx.removeEventListener("statechange", onState); } catch { /* ignore */ }
+    if (gateAudioHook === ctx) gateAudioHook = null;
+    if (!restartTimer || restartTimer !== gateRetry || gate || cur || !canRunWake()) return;
+    clearTimeout(restartTimer);
+    restartTimer = null;
+    gateRetry = null;
+    gateFails = 0;
+    startGate();
+  };
+  try { ctx.addEventListener("statechange", onState); } catch { gateAudioHook = null; }
 }
 
 function gateTick(g) {

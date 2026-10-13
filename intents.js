@@ -195,6 +195,7 @@ export const LINES = Object.freeze({
   // §5.1 Anzeige (app via hud)
   idleBoot: "Bereit. Sag „Hey Jarvis“.",
   idleBootNoWake: "Bereit. Tipp auf die Kugel oder schreib unten.",
+  idleBootNoWakeMouse: "Bereit. Klick auf die Kugel oder schreib unten.",   // …Mouse: Rechner mit Maus (visual-ux-13)
   followUpDetail: "Noch etwas, {A}?",
   // {T} = „zweimal tippen“ bzw. am Rechner „Doppelklick“ (visual-ux-11/13)
   veilStealth: "☾ Still im Hintergrund · „Jarvis“ oder {T} holt mich zurück",
@@ -208,6 +209,9 @@ export const LINES = Object.freeze({
   unlockStart: "Tippen, um Jarvis zu starten",
   unlockAnswer: "Tippen, um die Antwort zu hören",
   unlockAwake: "Tippen, um Jarvis wach zu halten",
+  unlockStartMouse: "Klicken, um Jarvis zu starten",
+  unlockAnswerMouse: "Klicken, um die Antwort zu hören",
+  unlockAwakeMouse: "Klicken, um Jarvis wach zu halten",
   // §5.3 Protokoll
   readyLog: "Alle Systeme online. Sag „Hey Jarvis“.",
   readyLogNoWake: "Alle Systeme online.",
@@ -1312,11 +1316,21 @@ export function toDuForm(text) {
   // je Teilsatz (bis Komma/Semikolon): Nebensatz → Verb am Ende, „Ich trinke“ → 2. Wort, „Morgen arbeite ich“ → davor
   const verbAt = new Set();
   let seg = [];
+  const isNoun = (i) => /^[A-ZÄÖÜ]/u.test(toks[i]);
+  // Nebensatz mit „ich“, der am Komma noch kein Verb hatte („dass ich gern Äpfel, Birnen und Bananen esse“): der Satz
+  // geht hinter dem Komma weiter, das Verb steht erst am Ende der Aufzählung
+  const openClause = () => {
+    const ich = seg.findIndex((i) => lower(i) === "ich");
+    if (ich < 0 || !SUBORDINATE.has(lower(seg[0])) || seg.length <= ich + 1) return false;
+    const last = seg[seg.length - 1];
+    return isNoun(last) || !verbDu(toks[last]);
+  };
   const flush = () => {
     const ich = seg.findIndex((i) => lower(i) === "ich");
     if (ich >= 0) {
       if (SUBORDINATE.has(lower(seg[0])) && seg.length > ich + 1) {
-        verbAt.add(seg[seg.length - 1]);
+        if (!isNoun(seg[seg.length - 1])) verbAt.add(seg[seg.length - 1]);   // „… Tee“ ist kein Verb
+
         // „dass ich X trinke und Y höre“: auch das Verb vor „und/oder“ (visual-ux-7) – aber nicht in Reihen wie
         // „große und kleine Hunde“ oder „Tee und Kaffee“
         for (let k = ich + 2; k < seg.length - 1; k++) {
@@ -1335,6 +1349,7 @@ export function toDuForm(text) {
   };
   toks.forEach((t, i) => {
     if (isWord(t)) seg.push(i);
+    else if (/^,+$/u.test(t) && openClause()) return;
     else if (/[,;:.!?]/u.test(t)) flush();
   });
   flush();
