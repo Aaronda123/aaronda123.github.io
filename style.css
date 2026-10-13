@@ -2,6 +2,28 @@
    Hochformat angeordnet (ARCHITECTURE.md §9): Kopfzeile, Weltuhren, Bühne mit dem Neuronen-Ball, Links, Eingabezeile,
    sechs Panels zum Wischen, Laufband. Themen „mac“ (rot, Standard) und „tuerkis“ über html[data-theme]. */
 
+/* ================= Schriften: lokal (kein Abruf bei Google, security-privacy-7); SIL OFL 1.1, siehe fonts/OFL-*.txt ===== */
+@font-face { font-family: "Orbitron"; font-style: normal; font-weight: 500 700; font-display: swap;
+  src: url("fonts/orbitron-latin.woff2") format("woff2"); }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("fonts/rajdhani-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("fonts/rajdhani-500-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("fonts/rajdhani-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("fonts/rajdhani-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 700; font-display: swap;
+  src: url("fonts/rajdhani-700-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Rajdhani"; font-style: normal; font-weight: 700; font-display: swap;
+  src: url("fonts/rajdhani-700-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
 /* ================= Farben (Themen) ================= */
 :root {
   --gutter: 16px; --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px); --kb: 0px;
@@ -144,7 +166,7 @@ body.dim .stage { opacity: .5; }
 body.state-idle .state-label { opacity: 0; }
 
 /* Telemetrie wie am Mac (live L432-438): AUDIO.IN und WAKE.WORD aus, KI.KERN und LETZTE ANTWORT klein unten links */
-.telemetry { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.telemetry { position: absolute; inset: 0; pointer-events: none; z-index: 2; transition: opacity .3s ease; }
 .tm {
   position: absolute; bottom: 0; padding: 3px 9px; max-width: 48%;
   border-left: 2px solid var(--accent); background: linear-gradient(90deg, rgba(var(--c-rgb), .07), transparent);
@@ -157,6 +179,10 @@ body.state-idle .state-label { opacity: 0; }
 .tm.t4 { left: 52%; }
 body.state-idle .tm { opacity: .7; }
 #imgview.show ~ .telemetry, #model3d.show ~ .telemetry { opacity: 0; }
+/* Unter der Kugel nie übereinander: Link-Knöpfe stehen direkt über der Eingabezeile, der Hinweis darüber; solange
+   Links oder der Hinweis da sind, ist die Telemetrie weg, und während des Hinweises auch die Zustandsschrift. */
+body.has-links .telemetry, body.toast-on .telemetry { opacity: 0; }
+body.toast-on .state-label { opacity: 0; }
 
 /* Bild: „Zeig mir ein Bild von …“ (Mac L331-339), auf der Bühne */
 #imgview {
@@ -227,15 +253,17 @@ body.dim .cmdline:not(:focus-within) { opacity: .45; }
 .cmdline input {
   flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: none; padding: 0;
   font: 600 16px Rajdhani, sans-serif; color: var(--text); -webkit-user-select: text; user-select: text;
+  text-overflow: ellipsis;
 }
 .cmdline input::placeholder { color: var(--muted); opacity: 1; transition: color .3s; text-overflow: ellipsis; }
 .cmdline.live input::placeholder { color: var(--accent); }
 .cmdline .mic {
-  flex: none; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid var(--cyan-3);
+  position: relative; flex: none; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid var(--cyan-3);
   background: rgba(var(--c-rgb), .08); color: var(--accent); font-size: 16px; line-height: 1;
   transition: background .2s, color .2s, box-shadow .2s;
 }
 body.state-listening .cmdline .mic { background: var(--accent); color: #000; box-shadow: 0 0 14px var(--accent-soft); }
+.cmdline .mic::after { content: ""; position: absolute; inset: -6px -4px -6px -8px; border-radius: 50%; } /* 48 px Trefferfläche */
 
 /* ================= Panels zum Wischen ================= */
 .deck {
@@ -267,17 +295,21 @@ body.state-listening .cmdline .mic { background: var(--accent); color: #000; box
 .tag.dim { color: var(--muted); font-weight: 500; letter-spacing: .08em; overflow: hidden; text-overflow: ellipsis; min-width: 0; line-height: 1.35; } /* SCHLÜSSEL: Punkte nicht abschneiden */
 .label { display: block; font-size: 11px; letter-spacing: .14em; color: var(--muted); }
 body.dim .panel { opacity: .62; }
+@media (hover: hover) {                                     /* Mac: unter der Maus wieder hell (live L82, L118) */
+  body.dim .panel:hover, body.dim .cmdline:hover { opacity: 1; }
+}
 
 /* Punkte unter den Panels */
-.dots { display: flex; justify-content: center; align-items: center; gap: 2px; }
-.dots button { position: relative; width: 18px; height: 14px; padding: 0; border: 0; background: none; }
+.dots { display: flex; justify-content: center; align-items: center; gap: 2px; position: relative; z-index: 3; }
+/* 26 × 44 px Trefferfläche (visual-ux-4), der Punkt bleibt 8 px; die Zeile selbst bleibt 14 px hoch */
+.dots button { position: relative; width: 26px; height: 44px; margin: -15px 0; padding: 0; border: 0; background: none; }
 .dots button::before {
-  content: ""; position: absolute; left: 5px; top: 3px; width: 8px; height: 8px; border-radius: 50%;
+  content: ""; position: absolute; left: 9px; top: 18px; width: 8px; height: 8px; border-radius: 50%;
   background: var(--cyan-3); transition: background .3s, box-shadow .3s;
 }
 .dots button.active::before { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .dots button.badge::after {
-  content: ""; position: absolute; left: 3px; top: 1px; width: 12px; height: 12px; border-radius: 50%;
+  content: ""; position: absolute; left: 7px; top: 16px; width: 12px; height: 12px; border-radius: 50%;
   border: 1px solid var(--accent); animation: badge 1.4s ease-out infinite;
 }
 @keyframes badge { from { transform: scale(.6); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
@@ -383,11 +415,18 @@ body.dim .panel { opacity: .62; }
 .net b { font: 700 14px Orbitron, sans-serif; font-variant-numeric: tabular-nums; }
 body.offline #diag-state { color: var(--red); }
 
-/* KOMMANDO (Mac L162-179): zwei Spalten für Finger, darunter drei in einer Reihe */
-#p-control { padding: 10px 12px; }
+/* KOMMANDO (Mac L162-179): drei Spalten, die drei Knöpfe der letzten Reihe direkt darunter (alle 9 sichtbar, auch auf
+   kleinen Handys mit ⚙), der Hinweis zuletzt; Beschriftungen brechen um statt abzuschneiden (visual-ux-8/9) */
+#p-control { padding: 10px 12px; display: flex; flex-direction: column; }
+#p-control > * { flex: none; }
 #p-control header { margin-bottom: 7px; }
-.buttons { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
-#p-control button { min-height: 34px; padding-top: 4px; padding-bottom: 4px; font-size: 14.5px; }
+#p-control .row-end { order: 2; }
+#p-control .hotkeys { order: 3; }
+.buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+#p-control button {
+  min-height: 36px; padding: 3px 4px; font-size: 14.5px; line-height: 1.1; text-align: center;
+  white-space: normal; overflow-wrap: anywhere; -webkit-hyphens: auto; hyphens: auto;
+}
 .panel button, .sheet-body button:not(.primary):not(.close) {
   min-height: 40px; padding: 6px 10px; border: 1px solid var(--cyan-3); border-radius: 2px;
   background: rgba(var(--c-rgb), .06); color: var(--text); text-align: left; letter-spacing: .02em;
@@ -395,9 +434,31 @@ body.offline #diag-state { color: var(--red); }
 }
 .panel button:active, .sheet-body button:not(.primary):not(.close):active { background: rgba(var(--c-rgb), .16); border-color: var(--cyan); transform: translateY(1px); }
 #wake-btn.off, #focus-btn.on { color: var(--amber); border-color: rgba(255, 184, 77, .5); }
-.hotkeys { margin-top: 5px; font-size: 12px; color: var(--muted); line-height: 1.25; }
+.hotkeys { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.25; }
 .row-end { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 6px; }
-#p-control .row-end button { text-align: center; color: var(--muted); padding-left: 3px; padding-right: 3px; letter-spacing: 0; font-size: 13.5px; }
+#p-control .row-end button { color: var(--muted); letter-spacing: 0; font-size: 13.5px; }
+
+/* Finger: mindestens 44 px Trefferfläche (visual-ux-4) */
+@media (pointer: coarse) {
+  #p-control button { min-height: 44px; }
+  .act { min-height: 44px; }
+  .timer { min-height: 44px; }
+  .sheet .close { width: 44px; height: 44px; }
+  .sheet .sheet-body button.data-del { width: 44px; min-height: 44px; }
+}
+
+/* „▾“ unten an einem Panel, solange darunter noch etwas kommt (Touch: keine sichtbare Bildlaufleiste, visual-ux-9) */
+.panel.page.more::after {
+  content: "▾"; order: 9; position: sticky; bottom: -14px; z-index: 2; display: block; flex: none;
+  margin: 2px -14px -14px; padding: 12px 0 2px; text-align: center; pointer-events: none;
+  font: 700 12px/1 Orbitron, sans-serif; color: var(--accent); text-shadow: 0 0 8px var(--accent-soft);
+  background: linear-gradient(180deg, transparent, var(--panel-b) 70%);
+}
+#p-control.more::after { margin-left: -12px; margin-right: -12px; margin-bottom: -10px; bottom: -10px; }
+.deck.more {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 46px), rgba(0, 0, 0, .25));
+  mask-image: linear-gradient(180deg, #000 calc(100% - 46px), rgba(0, 0, 0, .25));
+}
 
 /* ================= Laufband (Mac L279-289) ================= */
 .ticker {
@@ -446,8 +507,8 @@ body.popin #galaxy { animation: gxin .4s ease-out; }
 html.is-hidden #veil { visibility: visible; opacity: 1; transition: opacity .32s ease; }
 #veil-hint {
   position: absolute; left: 50%; bottom: calc(var(--safe-b) + 28px); transform: translateX(-50%);
-  max-width: calc(100% - 2 * var(--gutter)); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font: 500 11px Rajdhani, sans-serif; letter-spacing: .08em; color: var(--muted); opacity: .22;
+  width: max-content; max-width: calc(100% - 2 * var(--gutter)); text-align: center; text-wrap: balance;
+  font: 500 11px/1.4 Rajdhani, sans-serif; letter-spacing: .08em; color: var(--muted); opacity: .22;
   transition: opacity .4s ease, translate 1.2s ease;
 }
 
@@ -456,10 +517,16 @@ html.is-hidden #veil { visibility: visible; opacity: 1; transition: opacity .32s
   position: fixed; inset: 0; z-index: 60; display: block;
   background: radial-gradient(ellipse at 50% 42%, rgba(var(--c-rgb), .10), rgba(0, 0, 0, .55) 45%, rgba(0, 0, 0, .78));
 }
+#unlock.closing { opacity: 0; transition: opacity .2s ease; }
+#unlock.closing #unlock-text { animation: none; }
+/* dunkle Pille: der Satz liegt über der (roten) Kugel und muss trotzdem lesbar sein (visual-ux-10) */
 #unlock-text {
-  position: absolute; left: var(--gutter); right: var(--gutter); top: var(--unlock-y, 42%); transform: translateY(-50%);
-  text-align: center; font: 700 13px/1.6 Orbitron, sans-serif; letter-spacing: .3em; color: var(--accent);
-  text-shadow: 0 0 16px var(--accent-soft); animation: pulse 2.2s ease-in-out infinite;
+  position: absolute; left: 50%; top: var(--unlock-y, 42%); transform: translate(-50%, -50%);
+  width: max-content; max-width: calc(100% - 2 * var(--gutter)); padding: 9px 16px 9px calc(16px + .3em);
+  border: 1px solid var(--accent); border-radius: 22px; background: rgba(0, 0, 0, .78);
+  box-shadow: 0 0 18px var(--accent-soft); text-align: center; text-wrap: balance;
+  font: 700 13px/1.6 Orbitron, sans-serif; letter-spacing: .3em; color: var(--text);
+  text-shadow: 0 0 12px var(--accent-soft); animation: pulse 2.2s ease-in-out infinite;
 }
 
 /* Startbildschirm */
@@ -483,7 +550,7 @@ html.is-hidden #veil { visibility: visible; opacity: 1; transition: opacity .32s
 }
 #toast.show { opacity: 1; visibility: visible; transform: translate(-50%, 0); transition: opacity .25s ease, transform .25s ease; }
 
-/* Bildschirm wach halten: stummes Video, praktisch unsichtbar */
+/* Bildschirm wach halten: schwarzes Video mit stummer Tonspur, praktisch unsichtbar */
 #awake-video { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: .01; pointer-events: none; z-index: 0; }
 
 /* ================= Blätter: Einstellungen, „Hey Jarvis“, Daten ================= */
@@ -549,11 +616,16 @@ html.is-hidden #veil { visibility: visible; opacity: 1; transition: opacity .32s
 .hint.install { margin: 0; color: var(--amber); }
 .hint.install:empty { display: none; }
 body.standalone #install-hint { display: none; }
-.sheet-body > button.primary {
+.sheet-body > button.primary, .sheet .import-btns button.primary {
   min-height: 48px; border: 1px solid var(--cyan); border-radius: 3px; text-align: center;
   font: 700 13px Orbitron, sans-serif; letter-spacing: .2em; color: #000; background: var(--cyan); box-shadow: 0 0 18px var(--accent-soft);
 }
-.sheet-body > button.primary:active { transform: translateY(1px); }
+/* „Speichern“ bleibt unten sichtbar, egal wie weit man scrollt (visual-ux-2) */
+.sheet-body > button.primary { position: sticky; bottom: calc(var(--safe-b) + 8px); z-index: 3; }
+.sheet-body > button.primary:active, .sheet .import-btns button.primary:active { transform: translateY(1px); }
+.import-list { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; line-height: 1.35; }
+.import-list li.warn { color: var(--amber); }
+.sheet .import-btns { margin-top: 2px; }
 .help h3 { margin: 0 0 8px; font: 700 12px/1.4 Orbitron, sans-serif; letter-spacing: .1em; color: var(--accent); }
 .help p { margin: 6px 0 0; line-height: 1.4; }
 .help p.step { padding-left: 20px; text-indent: -20px; }
@@ -599,7 +671,7 @@ html.reduced .stage { transition: opacity .4s ease; }
 .sheet details.sub[open] > summary::after { transform: rotate(90deg); }
 .sheet select option:disabled { color: #777; }
 .help .devices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.help .devices button { text-align: center; font-size: 14px; padding-left: 4px; padding-right: 4px; }
+.help .devices button { text-align: center; font-size: 14px; padding-left: 4px; padding-right: 4px; white-space: normal; line-height: 1.15; }
 .help .devices button.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .help-url-copy { color: var(--sky); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .data-row {
@@ -622,38 +694,65 @@ html.reduced .stage { transition: opacity .4s ease; }
   .ticker { grid-row: 8; }
   .deck { grid-row: 7; overflow-x: hidden; overflow-y: auto; scroll-snap-type: none; } /* Bühne behält ≥ 220 px, Rest scrollt */
   .deck-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; height: auto; }
-  .panel.page { height: 214px; scroll-snap-align: none; }
+  /* so hoch wie der Inhalt (nichts abgeschnitten), mindestens 214 px; das Protokoll richtet sich nach dem Nachbarn */
+  .panel.page { height: auto; min-height: 214px; scroll-snap-align: none; }
+  #p-log { contain: size; }
   body.focus #app, body.kb-open #app { grid-template-rows: 40px 22px 0 minmax(200px, 1fr) auto 46px 0 0; }
+}
+/* Maus: dünne, sichtbare Bildlaufleisten (sonst ahnt man nicht, dass darunter noch etwas ist) */
+@media (hover: hover) and (pointer: fine) and (min-width: 700px) and (min-height: 501px) {
+  .deck, .panel.page { scrollbar-width: thin; scrollbar-color: var(--cyan-3) transparent; }
+  .deck::-webkit-scrollbar, .panel.page::-webkit-scrollbar { display: block; width: 6px; height: 6px; }
+  .deck::-webkit-scrollbar-thumb, .panel.page::-webkit-scrollbar-thumb { background: var(--cyan-3); border-radius: 3px; }
+  .deck::-webkit-scrollbar-track, .panel.page::-webkit-scrollbar-track { background: transparent; }
 }
 /* Rechner und iPad quer (ab 1100 px): wie das Mac-Overlay – links SYS.ZEIT, TERMINE, PROTOKOLL, Mitte Kugel und
    Eingabezeile, rechts KONTO, SYS.DIAGNOSE, KOMMANDO, unten das Laufband */
 @media (min-width: 1100px) and (min-height: 501px) {
+  /* eine Kopfzeile wie am Mac (live L209-226): Marke + Unterzeile links, Status mittig, Weltuhren rechts, keine
+     zusätzliche große Uhr (visual-ux-14); rechte Spalte wie am Mac 440 px, KOMMANDO ohne abgeschnittene Knöpfe */
   #app {
     max-width: none; --gutter: 22px; column-gap: 22px; row-gap: 8px;
+    --col-l: clamp(300px, 25vw, 360px); --col-r: clamp(400px, 32vw, 440px);
     padding: calc(var(--safe-t) + 14px) 22px calc(var(--safe-b) + 10px);
-    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr) minmax(340px, 440px);
-    grid-template-rows: 40px 22px repeat(12, minmax(0, 1fr)) 26px;
+    grid-template-columns: var(--col-l) minmax(0, 1fr) var(--col-r);
+    grid-template-rows: 40px minmax(0, 1fr) auto 46px 26px;
   }
   .topbar { grid-area: 1 / 1 / 2 / 4; }
-  .topstatus { grid-area: 2 / 1 / 3 / 4; justify-content: center; }
-  .worldclocks { grid-area: 3 / 2 / 4 / 3; max-width: 560px; width: 100%; justify-self: center; }
-  .stage-wrap { grid-area: 4 / 2 / 13 / 3; }
-  .actionbar { grid-area: 13 / 2 / 14 / 3; align-self: center; }
-  .cmdline { grid-area: 14 / 2 / 15 / 3; align-self: center; width: min(480px, 100%); justify-self: center; }
-  .ticker { grid-area: 15 / 1 / 16 / 4; }
-  .deck, .deck-track { display: contents; }
+  .topclock { display: none; }
+  .brand .sub { display: inline; margin-left: 14px; font-size: 12px; vertical-align: 1px; }
+  .topstatus { grid-area: 1 / 2 / 2 / 3; justify-content: center; align-self: center; z-index: 1; min-width: 0; }
+  .worldclocks {
+    grid-area: 1 / 3 / 2 / 4; justify-self: end; align-self: center; z-index: 1; margin-right: 48px;
+    display: flex; gap: 16px; width: auto; max-width: calc(100% - 48px);
+  }
+  .wc { text-align: right; }
+  .wc b { font-size: 15px; }
+  .stage-wrap { grid-area: 2 / 2 / 3 / 3; }
+  .actionbar { grid-area: 3 / 2 / 4 / 3; align-self: end; }
+  .cmdline { grid-area: 4 / 2 / 5 / 3; align-self: center; width: min(480px, 100%); justify-self: center; }
+  .ticker { grid-area: 5 / 1 / 6 / 4; }
   .dots { display: none; }
-  .panel.page { height: auto; min-height: 0; flex: none; scroll-snap-align: none; }
-  #p-clock { grid-area: 3 / 1 / 6 / 2; }
-  #p-termine { grid-area: 6 / 1 / 9 / 2; }
-  #p-log { grid-area: 9 / 1 / 15 / 2; }
-  #p-konto { grid-area: 3 / 3 / 8 / 4; }
-  #p-system { grid-area: 8 / 3 / 11 / 4; }
-  #p-control { grid-area: 11 / 3 / 15 / 4; }
+  /* Zwei Spalten wie am Mac (live style.css .col, L93-116): jedes Panel so hoch wie sein Inhalt, links wächst nur das
+     PROTOKOLL, rechts das KONTO höchstens bis zu seinem Inhalt. Ohne neue Elemente: die Panels fließen spaltenweise
+     (flex column wrap), ein unsichtbarer Umbruch (::after) trennt die linke von der rechten Spalte; die Mitte bleibt
+     für Kugel und Eingabezeile frei (pointer-events gehen durch). Was trotzdem nicht passt, scrollt im Panel. */
+  .deck { grid-area: 2 / 1 / 5 / 4; min-height: 0; overflow: visible; scroll-snap-type: none; pointer-events: none; }
+  .deck-track { display: flex; flex-direction: column; flex-wrap: wrap; align-content: space-between; height: 100%; gap: 10px 0; }
+  .deck-track::after { content: ""; order: 4; flex: 0 0 100%; width: 0; }
+  .panel.page { pointer-events: auto; flex: 0 1 auto; height: auto; min-height: 0; scroll-snap-align: none; scroll-snap-stop: normal; }
+  #p-clock, #p-termine { order: 1; width: var(--col-l); }
+  #p-clock { max-height: 44%; }
+  #p-termine { max-height: 34%; }
+  #p-log { order: 3; width: var(--col-l); flex: 0 1 260px; }   /* Mac live L394: Protokoll links kleiner */
+  #p-konto, #p-system, #p-control { order: 5; width: var(--col-r); }
+  #p-konto { flex: 1 1 0; max-height: max-content; }
+  #p-system, #p-control { max-height: 46%; }
+  #p-system #diag-graph, #p-system .legend, #p-control .hotkeys { display: none; }   /* Mac live L392, L451 */
   #p-control .buttons { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #p-control .buttons button { font-size: 13.5px; padding-left: 6px; padding-right: 6px; }
   .brand { font-size: 17px; letter-spacing: .32em; }
-  body.focus #app, body.kb-open #app { grid-template-rows: 40px 22px repeat(12, minmax(0, 1fr)) 26px; }
+  body.focus #app, body.kb-open #app { grid-template-rows: 40px minmax(0, 1fr) auto 46px 26px; }
   body.focus .worldclocks { display: none; }
 }
 /* Handy quer (niedrig): Bühne links, Panels rechts, kein Laufband */

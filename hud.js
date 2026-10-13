@@ -19,7 +19,12 @@ const LABELS = {
   thinking: "DENKE NACH", speaking: "SPRICHT", error: "FEHLER",
 };
 const STATES = Object.keys(LABELS);
-const PLACEHOLDER = "Frag Jarvis … oder sag „Hey Jarvis“";
+const PLACEHOLDER_WAKE = "Frag Jarvis … oder sag „Hey Jarvis“";
+const PLACEHOLDER_WAKE_SHORT = "Frag Jarvis … oder sag „Jarvis“";
+const PLACEHOLDER_TYPE = "Frag Jarvis …";
+let PLACEHOLDER = PLACEHOLDER_WAKE;
+let wakeHintOn = true;
+const MODEL_HINT_MOUSE = "ZIEHEN: DREHEN · MAUSRAD: ZOOM · DOPPELKLICK: ZURÜCK";
 const PAGES = ["clock", "termine", "log", "konto", "system", "control"];
 const LOG_PAGE = 2;
 const SYSTEM_PAGE = 4;
@@ -123,6 +128,9 @@ export function init(callbacks = {}) {
   const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const tip = document.querySelector("#boot .boot-tip");
   if (tip) tip.hidden = !(ios && !standalone);
+  // Maus statt Finger (Rechner): Hinweis im 3D-Fenster passend (Mausrad, Doppelklick)
+  const mouse = !!window.matchMedia?.("(pointer: fine)").matches && !window.matchMedia?.("(any-pointer: coarse)").matches;
+  if (mouse && $("model3d-hint")) setText($("model3d-hint"), MODEL_HINT_MOUSE);
 
   if (window.Orb) {
     try {
@@ -138,6 +146,7 @@ export function init(callbacks = {}) {
   if (window.Model3D) window.Model3D.onClose = () => call("onModelClosed");
 
   loadOrb();
+  bindImage();
   bindStage();
   bindControls();
   bindDeck();
@@ -155,6 +164,7 @@ export function init(callbacks = {}) {
   const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
   mq?.addEventListener?.("change", () => setReducedMotion(mq.matches));
   setOnline(navigator.onLine !== false);
+  try { document.fonts?.ready?.then(() => { fitPlaceholder(); updateMore(); }); } catch { /* ignore */ }
   renderWorld(new Date());
   renderCalendar(new Date());
   renderKonto(null);
@@ -230,10 +240,68 @@ export function setDetail(text) {
   setText($("status"), t);
 }
 
+// Textbreite in der Schrift der Eingabezeile (Platzhalter kürzen, live das Ende zeigen)
+let measureCtx = null;
+function textWidth(text, input) {
+  try {
+    measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+    const cs = getComputedStyle(input);
+    measureCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    return measureCtx.measureText(String(text)).width;
+  } catch {
+    return 0;
+  }
+}
+
+// Längerer Satz, als in die Zeile passt: das Neueste zeigen („…und Umgebung“), nicht den Anfang (visual-ux-3)
+function fitTail(text, input) {
+  const w = input.clientWidth - 6;
+  if (w <= 0 || textWidth(text, input) <= w) return text;
+  const open = text.startsWith("„") ? "„" : "";
+  const close = open && text.endsWith("“") ? "“" : "";
+  const inner = text.slice(open.length, text.length - close.length);
+  let lo = 0;
+  let hi = inner.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (textWidth(`${open}…${inner.slice(mid)}${close}`, input) <= w) hi = mid;
+    else lo = mid + 1;
+  }
+  let tail = inner.slice(lo);
+  const sp = tail.indexOf(" ");
+  if (lo > 0 && sp >= 0 && sp < tail.length - 6) tail = tail.slice(sp + 1);     // an einer Wortgrenze
+  return `${open}…${tail.trimStart()}${close}`;
+}
+
 // Die Eingabezeile zeigt live, was Jarvis gerade hört oder tut (null = Ruhe)
+let liveText = null;
 export function setLive(text) {
+  liveText = text || null;
+  const input = $("ask-input");
   $("ask-form").classList.toggle("live", !!text);
-  $("ask-input").placeholder = text || PLACEHOLDER;
+  input.placeholder = text ? fitTail(String(text), input) : PLACEHOLDER;
+}
+
+// Platzhalter, der in die Zeile passt (schmale Handys: ohne „Hey“, ganz schmal nur „Frag Jarvis …“, visual-ux-8)
+function fitPlaceholder() {
+  const input = $("ask-input");
+  if (!input) return;
+  const list = wakeHintOn ? [PLACEHOLDER_WAKE, PLACEHOLDER_WAKE_SHORT, PLACEHOLDER_TYPE] : [PLACEHOLDER_TYPE];
+  const w = input.clientWidth - 6;
+  let next = list[list.length - 1];
+  for (const c of list) {
+    if (w <= 0 || textWidth(c, input) <= w) { next = c; break; }
+  }
+  const showing = !liveText;
+  PLACEHOLDER = next;
+  if (showing) input.placeholder = PLACEHOLDER;
+  else input.placeholder = fitTail(liveText, input);
+}
+
+/** Platzhalter der Eingabezeile mit oder ohne „Hey Jarvis“ (ohne Weckwort, z. B. Firefox oder Mikrofon gesperrt). */
+export function setWakeHint(on) {
+  wakeHintOn = !!on;
+  fitPlaceholder();
 }
 
 export function setTelemetry({ mic, wake, core, latencyMs } = {}) {
@@ -301,7 +369,21 @@ function logToEnd() {
   if (logStick && box) box.scrollTop = box.scrollHeight;
 }
 function relayout() {
-  requestAnimationFrame(() => { alignDeck(); logToEnd(); placeToast(); });   // Deck war evtl. nicht gerendert
+  requestAnimationFrame(() => { alignDeck(); logToEnd(); placeToast(); updateMore(); });   // Deck war evtl. nicht gerendert
+}
+
+// „▾“ unten an einem Panel (bzw. ein Ausblenden am Raster), solange darunter noch etwas kommt: auf Touch-Geräten gibt es
+// keine sichtbare Bildlaufleiste, sonst wirkt z. B. KOMMANDO ohne ⚙ wie abgeschnitten (visual-ux-9)
+function updateMore() {
+  for (const p of pageEls()) {
+    if (p.id === "p-log") continue;                      // das Protokoll scrollt in sich und steht am Ende
+    const more = p.clientHeight > 0 && p.scrollHeight - p.clientHeight - p.scrollTop > 6;
+    if (p.classList.contains("more") !== more) p.classList.toggle("more", more);
+  }
+  const deck = $("deck");
+  const vertical = deck.scrollHeight - deck.clientHeight > 6 && getComputedStyle(deck).overflowY === "auto";
+  const more = vertical && deck.scrollHeight - deck.clientHeight - deck.scrollTop > 6;
+  if (deck.classList.contains("more") !== more) deck.classList.toggle("more", more);
 }
 
 export function restoreLog(entries) {
@@ -422,6 +504,7 @@ function tick() {
   setText($("date"), `${WEEKDAYS[now.getDay()]}, ${now.getDate()}. ${MONTHS[now.getMonth()]} ${now.getFullYear()}`);
   if (timerList.length) refreshTimerTexts(now.getTime());
   sampleDiag();
+  updateMore();
 }
 
 // ================================================================ KONTO (Mac renderIncome, live app.js L470-550)
@@ -520,23 +603,35 @@ function cryptoRows(d) {
   });
 }
 
+// Echte Geldangaben? Ein Konto-Objekt nur mit Terminen zeigt weiter „Noch keine Werte“ (kein erfundenes 0,00 €).
+function hasMoney(k) {
+  if (!k) return false;
+  const n = (v) => v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
+  const list = (v) => Array.isArray(v) && v.length > 0;
+  return n(k.kontostand) || list(k.quellen) || list(k.konten) || list(k.krypto) || list(k.buchungen)
+    || (n(k.ziel_monat) && Number(k.ziel_monat) > 0) || (n(k.heute) && Number(k.heute) !== 0);
+}
+
 export function renderKonto(konto) {
-  const d = konto && typeof konto === "object" ? konto : null;
-  kontoData = d;
+  const full = konto && typeof konto === "object" ? konto : null;
+  kontoData = full;                                         // TERMINE liest daraus, auch ohne Geldangaben
+  const d = hasMoney(full) ? full : null;
   const sources = d && Array.isArray(d.quellen) ? d.quellen.filter((q) => q && typeof q === "object") : [];
   setText($("inc-stand"), d ? `STAND ${d.stand || "—"}` : "KEINE DATEN");
   document.querySelector("#p-konto .kt-empty").hidden = !!d;
   document.querySelector("#p-konto .kt-body").hidden = !d;
   if (!d) {
     $("p-konto").classList.remove("has-konten");
+    renderTermineList(new Date());
     return;
   }
   // KONTO mit dem Kontostand, darunter kleine Zeilen; in Dollar, wenn "waehrung": "USD" (dann auch die Einnahmen)
   const accounts = Array.isArray(d.konten) ? d.konten.filter((a) => a && typeof a === "object") : [];
   const money = d.waehrung === "USD" ? usd : eur;
-  const konto0 = Number(d.kontostand) || 0;
+  const known = d.kontostand !== null && d.kontostand !== undefined && d.kontostand !== "";
+  const konto0 = known ? Number(d.kontostand) || 0 : null;
   const prev = Number(d.kontostand_vortag) || 0;
-  const diff = prev ? konto0 - prev : null;
+  const diff = prev && known ? konto0 - prev : null;
   const dec = d.waehrung === "USD" ? 0 : 2;
   setText($("kt-konto-lbl"), accounts.length ? "KONTO" : "KONTOSTAND");
   $("p-konto").classList.toggle("has-konten", accounts.length > 0);
@@ -674,7 +769,9 @@ function sampleDiag() {
 // Tablet und Rechner (CR3.2): alle Panels gleichzeitig sichtbar, keine Seiten (die Punkte sind dann ausgeblendet)
 function pagedDeck() {
   const t = $("deck-track");
-  return !!t && getComputedStyle(t).display === "flex";   // Handy: Seiten zum Wischen; Raster/Spalten sonst
+  if (!t) return false;
+  const cs = getComputedStyle(t);
+  return cs.display === "flex" && cs.flexWrap === "nowrap";   // Handy: Seiten zum Wischen; Raster/Spalten sonst
 }
 
 // Verlauf: Mikrofon (Akzentfarbe, mit Fläche) und Latenz (helle Zweitfarbe) – Stil von Mac drawCpuGraph
@@ -738,7 +835,8 @@ function setOnline(on) {
 // Netz: Laufzeit zum eigenen Server, alle 30 s solange sichtbar (§9.8)
 let pingBusy = false;
 async function ping() {
-  if (!started || pingBusy || document.visibilityState !== "visible") return;
+  // ausgeblendet oder still im Hintergrund (Nachttisch): keine Messung, die keiner sieht (robustness-14)
+  if (!started || pingBusy || paused || root.classList.contains("is-hidden") || document.visibilityState !== "visible") return;
   if (!navigator.onLine) { setOnline(false); return; }
   pingBusy = true;
   const t0 = performance.now();
@@ -913,6 +1011,12 @@ function cutLabel(s) {
   return t.length > 32 ? `${t.slice(0, 31)}…` : t;
 }
 
+// Links oder Hinweis sichtbar: Telemetrie unter der Kugel blendet aus (body.has-links / body.toast-on, style.css)
+function syncLinkClass() {
+  body.classList.toggle("has-links", links.length > 0);
+  placeToast();
+}
+
 export function showLink(link) {
   if (!link || !link.url) return;
   const bar = $("actionbar");
@@ -930,6 +1034,7 @@ export function showLink(link) {
   entry.timer = setTimeout(() => removeLink(entry), LINK_MS);
   links.push(entry);
   bar.appendChild(a);
+  syncLinkClass();
 }
 
 function removeLink(entry) {
@@ -937,6 +1042,7 @@ function removeLink(entry) {
   entry.a.remove();
   const i = links.indexOf(entry);
   if (i >= 0) links.splice(i, 1);
+  syncLinkClass();
 }
 
 export function clearLinks() {
@@ -994,6 +1100,14 @@ export function pauseImage(on) {
 }
 
 export function hideImage() { imgHide(); }
+// Antippen des Bildes schließt es (es liegt über der Kugel, robustness-3)
+function bindImage() {
+  $("imgview").addEventListener("click", (e) => {
+    e.stopPropagation();
+    imgHide();
+    call("onImageClosed");
+  });
+}
 export function isImageOpen() { return imgOpen; }
 
 // ================================================================ 3D-Modell
@@ -1072,17 +1186,24 @@ function pinchSpread() {
   return Math.hypot(a.x - b.x, a.y - b.y) || 1;
 }
 
+// Unten auf der Bühne steht die Telemetrie (KI.KERN / LETZTE ANTWORT): die Kugel samt Zustandsschrift („HÖRE ZU“)
+// bekommt nur den Platz darüber, sonst liegen beide übereinander, sobald die Bühne niedriger als breit ist (visual-ux-1).
+const TELEMETRY_BAND = 36;
 function sizeStage() {
   const wrap = $("stage-wrap");
   const W = wrap.clientWidth, H = wrap.clientHeight;
   if (!W || !H) return;
-  const s = Math.max(60, Math.floor(Math.min(W, H)));
+  const band = body.classList.contains("focus") ? 0 : TELEMETRY_BAND;
+  const s = Math.max(60, Math.floor(Math.min(W, H - band)));
   const st = $("stage");
-  if (st.style.width !== `${s}px`) {
-    Object.assign(st.style, { width: `${s}px`, height: `${s}px`, margin: `${-s / 2}px 0 0 ${-s / 2}px` });
+  if (st.style.width !== `${s}px` || st.dataset.band !== String(band)) {
+    Object.assign(st.style, { width: `${s}px`, height: `${s}px`, margin: `${-s / 2}px 0 0 ${-s / 2}px`,
+      top: band ? `calc(50% - ${band / 2}px)` : "" });
+    st.dataset.band = String(band);
   }
   orb?.resize?.();
   orbPlace(orbPos[0], orbPos[1], false);
+  fitPlaceholder();
 }
 
 function bindStage() {
@@ -1218,7 +1339,7 @@ function markPage(i) {
     logToEnd();
   }
   if (i === SYSTEM_PAGE) { updateGauges(); drawDiag(); }
-  if (i === KONTO_PAGE && kontoData) { drawKontoCanvases(); if (started) wakeMarkets(); }
+  if (i === KONTO_PAGE && hasMoney(kontoData)) { drawKontoCanvases(); if (started) wakeMarkets(); }
 }
 
 function alignDeck() {
@@ -1232,6 +1353,8 @@ function bindDeck() {
   logBox.addEventListener("scroll", () => {                 // hochgescrollt: nicht mehr ans Ende springen
     if (logBox.clientHeight) logStick = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 24;
   }, { passive: true });
+  deck.addEventListener("scroll", updateMore, { passive: true });
+  for (const p of pageEls()) p.addEventListener("scroll", updateMore, { passive: true });
   deck.addEventListener("scroll", () => {
     const s = stride();
     if (s <= 0) return;
@@ -1264,24 +1387,45 @@ export function goToPage(name, smooth = true) {
 
 // ================================================================ Hinweis, Fokus, Abdunkeln, Wake-Knopf
 let toastTimer = 0;
-// Hinweis über der Eingabezeile (die je nach Tastatur/Layout woanders steht)
+// Hinweis über der Eingabezeile und über den Link-Knöpfen (die je nach Tastatur/Layout woanders stehen). Solange er
+// steht, blenden Zustandsschrift und Telemetrie unter der Kugel aus (body.toast-on): nichts überlappt.
 function placeToast(force = false) {
   const t = $("toast");
   if (!force && !t.classList.contains("show")) return;
+  const sheetOpen = !!document.querySelector(".sheet:not([hidden])");
   const cmd = $("ask-form").getBoundingClientRect();
   const bar = $("actionbar").getBoundingClientRect();          // Link-Knöpfe nicht verdecken
   const top = bar.height ? Math.min(cmd.top, bar.top) : cmd.top;
-  if (cmd.height && !root.classList.contains("is-hidden")) t.style.bottom = `${Math.max(8, window.innerHeight - top + 10)}px`;
-  else t.style.bottom = "";
+  if (sheetOpen || !cmd.height || root.classList.contains("is-hidden")) {
+    // über einem Blatt unten mittig, über „Speichern“ (visual-ux-5)
+    t.style.bottom = sheetOpen ? "calc(var(--safe-b) + 76px)" : "";
+    t.style.left = "";
+    return;
+  }
+  t.style.bottom = `${Math.max(8, window.innerHeight - top + 8)}px`;
+  // waagrecht über der Eingabezeile (Handy quer, Rechner: die steht nicht in der Bildschirmmitte)
+  t.style.left = `${Math.round(cmd.left + cmd.width / 2)}px`;
+}
+
+/** Hinweis sofort weg (ein Blatt geht auf). */
+export function hideToast() {
+  const t = $("toast");
+  clearTimeout(toastTimer);
+  t.classList.remove("show");
+  body.classList.remove("toast-on");
 }
 
 export function toast(text, ms = 2500) {
   const t = $("toast");
   setText(t, String(text || ""));
+  body.classList.add("toast-on");
   placeToast(true);
   t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), Math.max(800, Number(ms) || 2500));
+  toastTimer = setTimeout(() => {
+    t.classList.remove("show");
+    body.classList.remove("toast-on");
+  }, Math.max(800, Number(ms) || 2500));
 }
 
 export function setFocus(on) {
@@ -1313,6 +1457,8 @@ export function setVisibility(mode, { fast = false, pop = false, hint = "" } = {
   const veil = $("veil");
   if (mode === "hidden" || mode === "stealth") {
     if (hint) setText($("veil-hint"), hint);
+    // frisch ausgeblendet: der Weg zurück ist ein paar Sekunden gut lesbar, dann wieder dunkel (Einbrennschutz)
+    if (!root.classList.contains("is-hidden")) flashVeilHint(4000);
     veil.style.transition = fast ? "none" : "";
     $("app").style.transition = fast ? "none" : "";
     body.classList.remove("popin");
@@ -1343,8 +1489,8 @@ export function setPaused(on) {
   paused = !!on;
   root.classList.toggle("paused", paused);
   orb?.pause(paused || !started);
-  // ausgeblendet: 3D-Modell mit weg (sonst rechnet es unsichtbar weiter)
-  if (paused && isModelOpen()) hideModel();
+  // Das 3D-Modell bleibt: kurz in eine andere App und zurück soll es nicht wegnehmen (robustness-10). Ausblenden und
+  // Hintergrund (enterHidden/enterStealth in app.js) schließen es selbst; im Hintergrund-Tab drosselt der Browser.
   window.Galaxy?.pause(paused);
   if (!paused) { // wieder sichtbar: sofort alles auf den aktuellen Stand bringen
     lastMinute = -1;
@@ -1353,6 +1499,7 @@ export function setPaused(on) {
     drawDiag();
     if (kontoData) drawKontoCanvases();
     wakeMarkets();
+    ping();
   }
 }
 
@@ -1366,11 +1513,15 @@ function bindVeil() {
       return;
     }
     veilTapAt = now;
-    const h = $("veil-hint"); // einmal: Hinweis kurz heller
-    h.style.opacity = "0.6";
-    clearTimeout(veilFlash);
-    veilFlash = setTimeout(() => { h.style.opacity = ""; }, 2000);
+    flashVeilHint(2000); // einmal: Hinweis kurz heller
   });
+}
+
+function flashVeilHint(ms) {
+  const h = $("veil-hint");
+  h.style.opacity = "0.6";
+  clearTimeout(veilFlash);
+  veilFlash = setTimeout(() => { h.style.opacity = ""; }, ms);
 }
 
 // Einbrennschutz: Hinweis jede Minute ein paar Pixel verschieben
@@ -1396,19 +1547,30 @@ export function showBoot(line) {
   boot.hidden = false;
 }
 
+let unlockHideTimer = 0;
 export function showUnlock(text) {
   const u = $("unlock");
   if (text == null) {
-    u.hidden = true;
+    if (u.hidden) return;
+    // Erst unsichtbar, ein paar hundert ms später weg: der Klick, den der Browser nach dem Tippen nachschiebt, landet
+    // noch auf dem Fänger und nicht auf der Kugel darunter (die würde sonst „Ja, Boss?“ gleich wieder abbrechen)
+    u.classList.add("closing");
     body.classList.remove("locked");
+    clearTimeout(unlockHideTimer);
+    unlockHideTimer = setTimeout(() => { u.hidden = true; u.classList.remove("closing"); }, 450);
     return;
   }
+  clearTimeout(unlockHideTimer);
+  u.classList.remove("closing");
   setText($("unlock-text"), String(text));
   const r = $("stage").getBoundingClientRect(); // über der Kugel
   if (r.height) u.style.setProperty("--unlock-y", `${Math.round(r.top + r.height / 2)}px`);
   u.hidden = false;
   body.classList.add("locked");
+  try { u.focus({ preventScroll: true }); } catch { /* ignore */ } // Tastatur: Enter/Leertaste startet auch
 }
+
+export function isUnlockShown() { return !$("unlock").hidden && !$("unlock").classList.contains("closing"); }
 
 export function focusInput() {
   const input = $("ask-input");

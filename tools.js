@@ -1,7 +1,8 @@
 // ==============================================================================================================
 // CONTRACT – tools.js (owner: builder BRAIN). Spec: ARCHITECTURE.md §3.2.3, §3.5.3, §6.4, §6.5, §7.6, §7.7.
 // Executes AKTION payloads and quick-intent actions on the phone: validation/aliases, links that need a tap
-// (YouTube, Spotify, Google, Apple Maps, tel:, wa.me, Amazon), weather (open-meteo), Wikipedia images, 3D models
+// (YouTube, Spotify, Google, Apple Maps on Apple devices / Google Maps elsewhere, tel:, wa.me, Amazon), weather
+// (open-meteo), Wikipedia images, 3D models
 // (Mac model_spec) and orb commands as UI results, timers / notes / shortcuts / konto / termine / settings via
 // store.js, learn guard. Mac-only types answer honestly. Imports: store.js, intents.js. No DOM. runAction() never throws.
 // ==============================================================================================================
@@ -136,7 +137,7 @@ const WEEKDAYS = Array.isArray(intents.WEEKDAYS) && intents.WEEKDAYS.length === 
 /** §5.2 texts, used only when intents.line() is unavailable or cannot fill a key. */
 const FALLBACK_LINES = {
   macOnly: "Das mache ich am Mac, {A}.",
-  macOnlyMusic: "Das mache ich am Mac, {A}. Ton und Musik regelst du am iPhone selbst.",
+  macOnlyMusic: "Das mache ich am Mac, {A}. Ton und Musik regelst du am Gerät selbst.",
   macOnlyWhatsApp: "WhatsApp lese ich dir am Mac vor, {A}.",
   macOnlyMail: "Deine Mails mache ich am Mac, {A}.",
   macOnlyApps: "Programme schließe ich am Mac, {A}.",
@@ -599,20 +600,34 @@ export function waLink({ text, phone } = {}) {
   return digits.length >= 6 ? `https://wa.me/${digits}${q}` : `https://wa.me/${q || ""}`;
 }
 
+/** Apple Karten nur auf iPhone/iPad und in Safari am Mac; sonst Google Maps (öffnet auf Android die Maps-App, CR3.1). */
+export function appleMaps() {
+  try {
+    if (typeof navigator === "undefined") return false;
+    const ua = String(navigator.userAgent || "");
+    if (/iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) return true;
+    return /Macintosh/.test(ua) && /Safari\//.test(ua) && !/Chrome|Chromium|Edg|Firefox|OPR/.test(ua);
+  } catch { return false; }
+}
+
 /**
  * @param {string} query
- * @returns {string} https://maps.apple.com/?q=<enc>
+ * @param {boolean} [apple] default: appleMaps()
+ * @returns {string} https://maps.apple.com/?q=<enc> | https://www.google.com/maps/search/?api=1&query=<enc> (Mac L3080)
  */
-export function mapsLink(query) {
-  return `https://maps.apple.com/?q=${encodeURIComponent(String(query ?? "").trim())}`;
+export function mapsLink(query, apple = appleMaps()) {
+  const q = encodeURIComponent(String(query ?? "").trim());
+  return apple ? `https://maps.apple.com/?q=${q}` : `https://www.google.com/maps/search/?api=1&query=${q}`;
 }
 
 /**
  * @param {string} destination
- * @returns {string} https://maps.apple.com/?daddr=<enc>&dirflg=d
+ * @param {boolean} [apple] default: appleMaps()
+ * @returns {string} https://maps.apple.com/?daddr=<enc>&dirflg=d | https://www.google.com/maps/dir/?api=1&destination=<enc> (Mac L3729)
  */
-export function routeLink(destination) {
-  return `https://maps.apple.com/?daddr=${encodeURIComponent(String(destination ?? "").trim())}&dirflg=d`;
+export function routeLink(destination, apple = appleMaps()) {
+  const d = encodeURIComponent(String(destination ?? "").trim());
+  return apple ? `https://maps.apple.com/?daddr=${d}&dirflg=d` : `https://www.google.com/maps/dir/?api=1&destination=${d}`;
 }
 
 function hostOf(url) {

@@ -3,12 +3,18 @@
 // Logic of the three full-screen sheets whose static DOM lives in index.html (VISUAL):
 //   "setup" (#sheet-setup, Einstellungen: fill/read/validate/save, Stimme testen, Gehirn testen, Setup-/Kurzbefehl-Link),
 //   "help"  (#sheet-help, „Hey Jarvis“ einrichten: #help-url, #help-standalone, device switch preselected from the UA),
-//   "data"  (#sheet-data, Gemerkt / Kurzbefehle / Termine / Konto / Gespräch / Verbrauch lists, delete, import).
+//   "data"  (#sheet-data, Gemerkt / Kurzbefehle / Termine / Konto / Gespräch / Verbrauch lists, delete, import),
+//   "import" (#sheet-import, „Einstellungen übernehmen?“ for a #cfg= Setup-Link: what would change, accept/decline;
+//            open("import", { payload, source: "link"|"code" }) – nothing is applied before „Übernehmen“, sec-priv-1).
+// The setup sheet saves unsaved changes when it is closed (✕, Esc, Back, another sheet) and a successful „Testen“
+// stores the tested key at once (visual-ux-2). Setup-Links never carry keys (browser history); the keys move with the
+// Setup-Code (copy here, paste on the other device → the same „Einstellungen übernehmen?“ sheet, sec-priv-1/-3).
 // export function init(cb)        cb: { onSave(patch) → Promise, onCommand(cmd, detail) → any, onOpenChange(name|null),
 //                                       status() → { keyState, voiceState, micState, wakeState, standalone }, toast(text) }
 //                                 onCommand: "voice_test" {draft} · "history_clear" {} · "log_clear" {} ·
-//                                            "brain_test" {draft} → Promise<{ ok: boolean, text: string }>
-// export function open(name, { section }?)   "setup"|"help"|"data"; section → #sec-<section>
+//                                            "brain_test" {draft} → Promise<{ ok: boolean, text: string }> ·
+//                                            "import_done" { accepted }
+// export function open(name, { section, payload }?)   "setup"|"help"|"data"|"import"; section → #sec-<section>
 // export function close(name?)                undefined = all
 // export function isOpen(name?): boolean      undefined = any
 // export function refresh(): void             re-fill status chips and data lists
@@ -20,7 +26,7 @@
 import * as store from "./store.js";
 import { line } from "./intents.js";
 
-const SHEET_IDS = Object.freeze({ setup: "sheet-setup", help: "sheet-help", data: "sheet-data" });
+const SHEET_IDS = Object.freeze({ setup: "sheet-setup", help: "sheet-help", data: "sheet-data", import: "sheet-import" });
 const NAMES = Object.keys(SHEET_IDS);
 const CLAUDE_KEY_RX = /^sk-ant-[A-Za-z0-9_-]{20,}$/;
 const GEMINI_KEY_RX = /^[A-Za-z0-9_-]{30,}$/;
@@ -48,6 +54,9 @@ let filledClosing = "";        // Abschlussfrage, wie sie beim Füllen im Feld s
 let filledClosingWasDefault = false;
 let saving = false;
 let testing = false;
+let setupSnapshot = "";        // Formular beim Öffnen (ungespeicherte Änderungen erkennen)
+let importPayload = null;      // Setup-Link / Setup-Code, der auf „Übernehmen“ wartet
+let importSource = "link";     // "link" (#cfg= beim Öffnen) | "code" (eingefügter Setup-Code)
 
 const $ = (id) => (typeof document !== "undefined" ? document.getElementById(id) : null);
 
@@ -209,6 +218,30 @@ function fillSetup() {
   if (sel && !String(s.azureKey ?? "").trim() && [...sel.options].some((o) => o.value === FREE_PRESET)) sel.value = FREE_PRESET;
   updatePresetOptions();
   fillStatus();
+  setupSnapshot = JSON.stringify(readSetup());
+}
+
+function setupDirty() {
+  return isOpen("setup") && !!setupSnapshot && JSON.stringify(readSetup()) !== setupSnapshot;
+}
+
+// ✕, Esc, Zurück oder ein anderes Blatt: Eingetragenes nicht still wegwerfen, sondern speichern (visual-ux-2).
+// Ein Schlüssel, der nicht richtig aussieht, bleibt dabei weg (der gespeicherte bleibt).
+function saveIfDirty() {
+  if (!setupDirty() || saving) return;
+  const patch = readSetup();
+  const claude = String(patch.anthropicKey ?? "").trim();
+  const gemini = String(patch.geminiKey ?? "").trim();
+  let skipped = false;
+  if (claude && !CLAUDE_KEY_RX.test(claude)) { delete patch.anthropicKey; skipped = true; }
+  if (gemini && !GEMINI_KEY_RX.test(gemini)) { delete patch.geminiKey; skipped = true; }
+  setupSnapshot = JSON.stringify(readSetup());
+  try {
+    Promise.resolve(call("onSave", patch)).catch((e) => console.error("sheets: save", e));
+    toast(skipped ? "Gespeichert – der Schlüssel sah nicht richtig aus und bleibt draußen." : "Gespeichert.");
+  } catch (e) {
+    console.error("sheets: save", e);
+  }
 }
 
 function readSetup() {
@@ -248,6 +281,9 @@ function fillStatus() {
   if (st.wakeState != null) setText($("wake-state"), String(st.wakeState));
   const hint = $("install-hint");
   if (hint) hint.hidden = !!(st.standalone ?? isStandalone()) || !isIOS();
+  // „Kurzbefehl-Link“ gibt es nur für die iOS-App „Kurzbefehle“ (CR3.1: keine iPhone-Knöpfe auf anderen Geräten)
+  const sc = document.querySelector('#sheet-setup [data-cmd="copy_shortcut_link"]');
+  if (sc) sc.hidden = device() !== "ios";
 }
 
 // ---------------------------------------------------------------- Hilfe (§5.4, CR3.4)
@@ -375,6 +411,62 @@ function safe(fn, fallback) {
   }
 }
 
+// ---------------------------------------------------------------- Setup-Link übernehmen? (security-privacy-1)
+const KEY_NAMES = Object.freeze({ geminiKey: "Gemini-Schlüssel", anthropicKey: "Claude-Schlüssel", azureKey: "Azure-Schlüssel" });
+const PROFILE_NAMES = Object.freeze({ anrede: "Anrede", vorname: "Vorname", firma: "Firma", wohnort: "Wohnort" });
+const PROVIDER_NAMES = Object.freeze({ auto: "Automatisch", gemini: "Gemini", claude: "Claude" });
+
+function hostOf(url) {
+  try { return new URL(String(url)).hostname || String(url); } catch { return String(url || ""); }
+}
+
+/** Was der Link ändern würde, in kurzen deutschen Zeilen (wichtigstes zuerst). */
+function importLines(payload) {
+  const cur = settingsNow();
+  const ns = payload && typeof payload.s === "object" && payload.s ? payload.s : {};
+  const out = [];
+  for (const [k, name] of Object.entries(KEY_NAMES)) {
+    if (!(k in ns)) continue;
+    const a = String(cur[k] ?? "").trim();
+    const b = String(ns[k] ?? "").trim();
+    if (a === b) continue;
+    out.push({ warn: true, text: !b ? `${name} wird gelöscht.` : a ? `${name} wird ersetzt.` : `${name} wird eingetragen.` });
+  }
+  if ("brainProvider" in ns && ns.brainProvider !== cur.brainProvider) {
+    out.push({ warn: false, text: `Gehirn: ${PROVIDER_NAMES[ns.brainProvider] || ns.brainProvider}.` });
+  }
+  const prof = Object.keys(PROFILE_NAMES).filter((k) => k in ns && String(ns[k] ?? "") !== String(cur[k] ?? ""));
+  if (prof.length) out.push({ warn: false, text: `Profil: ${prof.map((k) => PROFILE_NAMES[k]).join(", ")}.` });
+  if ("gedaechtnis" in ns && String(ns.gedaechtnis ?? "").trim() !== String(cur.gedaechtnis ?? "").trim()) {
+    out.push({ warn: true, text: String(ns.gedaechtnis ?? "").trim() ? "Gedächtnis wird ersetzt." : "Gedächtnis wird geleert." });
+  }
+  const facts = Array.isArray(payload?.f) ? payload.f.filter((x) => typeof x === "string" && x.trim()) : [];
+  if (facts.length) out.push({ warn: true, text: `${facts.length} ${facts.length === 1 ? "Notiz kommt" : "Notizen kommen"} dazu („${String(facts[0]).slice(0, 60)}“${facts.length > 1 ? " …" : ""}).` });
+  const sc = Array.isArray(payload?.k) ? payload.k.filter((x) => x && typeof x.phrase === "string") : [];
+  for (const k of sc.slice(0, 6)) {
+    const acts = (Array.isArray(k.actions) ? k.actions : []).map((a) => {
+      if (!a || typeof a !== "object") return "";
+      return a.url ? `öffnet ${hostOf(a.url)}` : String(a.type || "");
+    }).filter(Boolean).join(", ");
+    out.push({ warn: true, text: `Kurzbefehl „${String(k.phrase).slice(0, 50)}“ → ${acts || "Aktion"}.` });
+  }
+  if (sc.length > 6) out.push({ warn: true, text: `… und ${sc.length - 6} weitere Kurzbefehle.` });
+  const other = Object.keys(ns).filter((k) => !(k in KEY_NAMES) && !(k in PROFILE_NAMES)
+    && !["brainProvider", "gedaechtnis", "deckPage"].includes(k) && JSON.stringify(ns[k]) !== JSON.stringify(cur[k]));
+  if (other.length) out.push({ warn: false, text: `Weitere Einstellungen (${other.length}): Stimme, Weckwort, Anzeige …` });
+  if (!out.length) out.push({ warn: false, text: "Nichts Neues – alles ist schon so eingestellt." });
+  return out;
+}
+
+function fillImport(payload, source) {
+  setText($("import-hint"), source === "code"
+    ? "Dieser Setup-Code will Jarvis auf diesem Gerät so ändern. Übernimm ihn nur, wenn du ihn selbst kopiert hast."
+    : "Dieser Link will Jarvis auf diesem Gerät so ändern. Übernimm ihn nur, wenn du ihn selbst erstellt hast.");
+  const list = $("import-list");
+  if (!list) return;
+  list.replaceChildren(...importLines(payload).map((l) => el("li", l.warn ? "warn" : "", l.text)));
+}
+
 // ---------------------------------------------------------------- Links (§8.4)
 async function copyText(text) {
   try {
@@ -401,11 +493,35 @@ async function copyText(text) {
   }
 }
 
+// Links tragen nie Schlüssel (sie landen im Browser-Verlauf); Schlüssel gehen nur mit dem Setup-Code (security-privacy-3)
 async function copyLink(wake) {
   let link = "";
   try { link = store.setupLink({ wake }); } catch { link = ""; }
   if (!link) { toast("Den Link kann ich gerade nicht bauen."); return; }
   toast(await copyText(link) ? "Link kopiert." : "Kopieren ging nicht. Bitte noch einmal tippen.");
+}
+
+async function copyCode() {
+  let code = "";
+  try { code = store.setupCode(); } catch { code = ""; }
+  if (!code) { toast("Den Setup-Code kann ich gerade nicht bauen."); return; }
+  toast(await copyText(code) ? "Setup-Code kopiert. Er enthält deine Schlüssel – nicht weitergeben."
+    : "Kopieren ging nicht. Bitte noch einmal tippen.");
+}
+
+function pasteCode() {
+  const box = $("f-setup-code");
+  const raw = String(box?.value ?? "").trim();
+  if (!raw) {
+    toast("Füge zuerst einen Setup-Code ein.");
+    try { box?.focus(); } catch { /* ignore */ }
+    return;
+  }
+  let payload = null;
+  try { payload = store.readSetupCode(raw); } catch { payload = null; }
+  if (!payload) { toast("Den Setup-Code verstehe ich nicht."); return; }
+  if (box) box.value = "";
+  open("import", { payload, source: "code" });     // erst zeigen, was sich ändert; nichts gilt vor „Übernehmen“
 }
 
 // ---------------------------------------------------------------- Befehle in den Blättern
@@ -419,9 +535,16 @@ async function brainTest() {
   const chip = $("key-state");
   setText(chip, "TESTE …");
   try {
-    const res = await call("onCommand", "brain_test", { draft: draftBrain() });
+    const draft = draftBrain();
+    const res = await call("onCommand", "brain_test", { draft });
     const ok = !!res?.ok;
     const text = String(res?.text || (ok ? line("brainOk") : line("err.other")));
+    if (ok) {                                    // verbunden: gleich speichern, ✕ darf ihn nicht mehr verlieren
+      const patch = { brainProvider: draft.brainProvider };
+      if (!draft.anthropicKey || CLAUDE_KEY_RX.test(draft.anthropicKey)) patch.anthropicKey = draft.anthropicKey;
+      if (!draft.geminiKey || GEMINI_KEY_RX.test(draft.geminiKey)) patch.geminiKey = draft.geminiKey;
+      try { await Promise.resolve(call("onSave", patch)); } catch (e) { console.error("sheets: save", e); }
+    }
     setText(chip, ok ? "VERBUNDEN" : keyStateFromForm() === "UNGÜLTIG" ? "UNGÜLTIG" : "FEHLER");
     toast(text);
   } catch {
@@ -445,6 +568,12 @@ function command(cmd, btn) {
       return true;
     case "copy_shortcut_link":
       copyLink(true);
+      return true;
+    case "copy_setup_code":
+      copyCode();
+      return true;
+    case "paste_setup_code":
+      pasteCode();
       return true;
     case "open_help":
       open("help");
@@ -499,7 +628,21 @@ function command(cmd, btn) {
     case "wipe_all":
       if (!confirmed("Wirklich alles löschen? Schlüssel, Gedächtnis, Kurzbefehle, Konto und Verlauf sind dann weg.")) return true;
       safe(() => store.wipe("all"), null);
-      try { location.reload(); } catch { /* ignore */ }
+      // erst auch den Stimmen-Cache leeren (gesprochene Sätze), dann neu laden (security-privacy-5)
+      Promise.race([Promise.resolve(safe(() => store.wipeDone(), null)), new Promise((r) => setTimeout(r, 1500))])
+        .finally(() => { try { location.reload(); } catch { /* ignore */ } });
+      return true;
+    case "import_accept": {
+      const payload = importPayload;
+      importPayload = null;
+      const ok = !!payload && !!safe(() => store.applySetup(payload), false);
+      close("import");
+      toast(ok ? "Einstellungen übernommen." : importSource === "code" ? "Der Setup-Code ist beschädigt." : "Der Setup-Link ist beschädigt.");
+      call("onCommand", "import_done", { accepted: ok });
+      return true;
+    }
+    case "import_decline":
+      close("import");
       return true;
     case "fact_delete":
       safe(() => store.removeFact(btn?.dataset.id || ""), false);
@@ -534,6 +677,7 @@ async function onSubmit(e) {
   saving = true;
   try {
     const patch = readSetup();
+    setupSnapshot = JSON.stringify(patch);
     const p = call("onSave", patch);           // synchron im Tippen: app darf hier das Mikrofon freischalten
     await Promise.resolve(p);
     close("setup");
@@ -612,8 +756,9 @@ export function init(callbacks = {}) {
  * @param {"setup"|"help"|"data"} name
  * @param {{ section?: string }} [opts]
  */
-export function open(name, { section } = {}) {
+export function open(name, { section, payload, source } = {}) {
   if (!SHEET_IDS[name]) return;
+  if (name !== "setup") saveIfDirty();          // aus den Einstellungen in „Hey Jarvis einrichten“: nichts verlieren
   for (const n of NAMES) {
     if (n !== name) {
       const other = $(SHEET_IDS[n]);
@@ -625,7 +770,11 @@ export function open(name, { section } = {}) {
   try {
     if (name === "setup") fillSetup();
     else if (name === "help") fillHelp();
-    else fillData();
+    else if (name === "import") {
+      if (payload) importSource = source === "code" ? "code" : "link";
+      importPayload = payload || importPayload;
+      fillImport(importPayload, importSource);
+    } else fillData();
   } catch (e) {
     console.error("sheets: fill", e);
   }
@@ -648,6 +797,12 @@ export function open(name, { section } = {}) {
  */
 export function close(name) {
   const list = name ? [name] : NAMES;
+  if (list.includes("setup")) saveIfDirty();
+  if (list.includes("import") && isOpen("import") && importPayload) {     // ✕ / Zurück = nicht übernehmen
+    importPayload = null;
+    toast("Nicht übernommen.");
+    call("onCommand", "import_done", { accepted: false });
+  }
   let changed = false;
   for (const n of list) {
     const s = $(SHEET_IDS[n]);

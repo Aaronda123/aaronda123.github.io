@@ -5,6 +5,9 @@
 // export function ure(src, flags?): RegExp            Unicode-aware \b \w \W, always the u flag (reference in §3.2.4)
 // export function norm(text); export function line(key, vars?); export const LINES   (all spoken lines, §5.2)
 // export function setAnrede(name)                      default {A} for line() when vars.A is not given
+// export function setDevice(name); device()            default {G} (iPhone|iPad|Handy|Tablet|Computer) for line()/brain
+// export function toDuForm(text)                       stored note (ich-Form) read back in the du-Form
+// export function parseTermin(body, now?)              free-mode „trag … ein“ → { titel, wann, phrase } | { needTime } | null
 // export function parseNumber(token); parseDuration(text); sayDuration(seconds); sayTime(date?); sayDate(date?)
 // export const NAME_STRONG, NAME_WEAK, GREET
 // export function matchWake(text): { rest, presence, greeted, raw } | null
@@ -13,7 +16,7 @@
 // export function stealthCombo(text); endsWithHide(text); isFarewell(text)
 // export function weatherQuery(t): { place, day }
 // export const SITES; export function openTarget(name, verb?, search?)
-// export function quickIntent(text, ctx): { say, actions, followUp, special, ui } | null   (Mac quick_intent, §7.1 + §7.7)
+// export function quickIntent(text, ctx): { say, actions, followUp, special, ui, macOnly? } | null   (Mac quick_intent, §7.1 + §7.7)
 //   ctx: { lastAnswer, findShortcut, anrede, wohnort, imageOpen, modelOpen, timers, now,
 //          brain?: boolean (false = no brain configured → free-mode intents of CR1.4), facts?: () => [{text}] }
 // export const LEARN_SIGNAL, MODEL_WORDS, DIM_WORDS; export function modelRequest(t, anrede?); modelSaid(spec, anrede?);
@@ -124,13 +127,14 @@ export const LINES = Object.freeze({
   timerStopped: "Okay, {A}, Timer gestoppt.",
   noTimer: "Es läuft gerade kein Timer.",
   closingDefault: "{A}, kann ich sonst noch was für Sie tun?",
-  macOnly: "Das mache ich am Mac, {A}.",
-  macOnlyMusic: "Das mache ich am Mac, {A}. Ton und Musik regelst du am iPhone selbst.",
-  macOnlyWhatsApp: "WhatsApp lese ich dir am Mac vor, {A}.",
-  macOnlyMail: "Deine Mails mache ich am Mac, {A}.",
-  macOnlyApps: "Programme schließe ich am Mac, {A}.",
-  macOnlyHotspot: "Den Hotspot verbinde ich am Mac, {A}.",
-  macOnlyTeach: "Neue Fähigkeiten bringt mir Claude Code am Mac bei, {A}.",
+  // öffentliche Seite: kein Verweis auf einen Mac-Jarvis, den Besucher nicht haben (visual-ux-6)
+  macOnly: "Das kann ich hier nicht, {A}.",
+  macOnlyMusic: "Das kann ich hier nicht, {A}. Ton und Musik regelst du am {G} selbst.",
+  macOnlyWhatsApp: "WhatsApp vorlesen kann ich hier nicht, {A}.",
+  macOnlyMail: "Deine Mails kann ich hier nicht lesen, {A}.",
+  macOnlyApps: "Programme schließen kann ich hier nicht, {A}.",
+  macOnlyHotspot: "Den Hotspot kann ich hier nicht verbinden, {A}.",
+  macOnlyTeach: "Neue Fähigkeiten kann ich mir hier nicht selbst beibringen, {A}.",
   nokey: "Ich bin noch nicht mit Claude verbunden. Trag bitte deinen Claude-Schlüssel in den Einstellungen ein.",
   noBrain: "Dafür brauche ich mein Gehirn, {A}. Mit einem kostenlosen Gemini-Schlüssel von Google denke ich mit. "
     + "Den trägst du in den Einstellungen ein.",
@@ -143,6 +147,10 @@ export const LINES = Object.freeze({
   "err.other": "Da ist etwas schiefgelaufen, {A}. Versuch es bitte noch einmal.",
   "err.gemini.auth": "Der Gemini-Schlüssel stimmt nicht, {A}. Schau bitte in den Einstellungen nach.",
   "err.gemini.rate": "Das kostenlose Kontingent ist gerade aufgebraucht, {A}. Versuch es gleich nochmal.",
+  "err.gemini.cut": "Da kam keine Antwort durch, {A}. Versuch es bitte noch einmal, gern etwas kürzer.",
+  "err.gemini.server": "Gemini ist gerade überlastet, {A}. Versuch es gleich noch einmal.",
+  "err.gemini.network": "Ich erreiche Gemini gerade nicht. Hast du Netz, {A}?",
+  "err.gemini.timeout": "Gemini braucht gerade zu lange, {A}. Versuch es gleich noch einmal.",
   refusal: "Dazu sage ich lieber nichts, {A}.",
   blockedAfterWeb: "Das löse ich wegen einer Webseite nicht automatisch aus, {A}. Sag es mir direkt, dann mache ich es.",
   actionFailed: "Das hat leider nicht geklappt.",
@@ -175,6 +183,8 @@ export const LINES = Object.freeze({
   kontoValue: "Den Betrag verstehe ich nicht, {A}.",
   terminValue: "Den Termin verstehe ich nicht, {A}. Sag mir Tag und Uhrzeit.",
   terminNone: "Diesen Termin finde ich nicht in deiner Liste.",
+  kontoSaid: "Ich trage deinen Kontostand von {betrag} ein.",
+  terminSaid: "Ich trage {titel} {wann} ein.",
   callNoNumber: "Dafür brauche ich eine Telefonnummer, {A}.",
   waReady: "Steht bereit für {to}. Tipp auf WhatsApp und dann auf Senden.",
   waReadyPlain: "Die Nachricht steht bereit. Tipp auf WhatsApp und wähl den Chat.",
@@ -184,28 +194,52 @@ export const LINES = Object.freeze({
   brainOk: "Gehirn verbunden.",
   // §5.1 Anzeige (app via hud)
   idleBoot: "Bereit. Sag „Hey Jarvis“.",
+  idleBootNoWake: "Bereit. Tipp auf die Kugel oder schreib unten.",
   followUpDetail: "Noch etwas, {A}?",
-  veilStealth: "☾ Still im Hintergrund · „Jarvis“ holt mich zurück",
-  veilHidden: "◐ Ausgeblendet · „Jarvis“ holt mich zurück",
-  veilMuted: "✕ Stumm · „Jarvis“ holt mich zurück",
-  veilNoMic: "Mikrofon pausiert · zweimal tippen",
+  // {T} = „zweimal tippen“ bzw. am Rechner „Doppelklick“ (visual-ux-11/13)
+  veilStealth: "☾ Still im Hintergrund · „Jarvis“ oder {T} holt mich zurück",
+  veilStealthPlain: "☾ Still im Hintergrund · „Jarvis“ holt mich zurück",
+  veilHidden: "◐ Ausgeblendet · „Jarvis“ oder {T} holt mich zurück",
+  veilHiddenPlain: "◐ Ausgeblendet · „Jarvis“ holt mich zurück",
+  veilMuted: "✕ Stumm · „Jarvis“ oder {T} holt mich zurück",
+  veilMutedPlain: "✕ Stumm · „Jarvis“ holt mich zurück",
+  veilNoMic: "Mikrofon pausiert · {T} holt mich zurück",
+  veilNoMicPlain: "Mikrofon pausiert · zweimal tippen",
   unlockStart: "Tippen, um Jarvis zu starten",
   unlockAnswer: "Tippen, um die Antwort zu hören",
+  unlockAwake: "Tippen, um Jarvis wach zu halten",
   // §5.3 Protokoll
   readyLog: "Alle Systeme online. Sag „Hey Jarvis“.",
+  readyLogNoWake: "Alle Systeme online.",
   stealthLog: "Still im Hintergrund. „Hey Jarvis“ oder einfach „Jarvis“ holt mich zurück.",
   micDenied: "Das Mikrofon ist für Jarvis gesperrt. Erlaube es in den iPhone-Einstellungen oder diktiere über die Tastatur.",
   micDeniedWeb: "Das Mikrofon ist gesperrt. Erlaube es für diese Seite oder diktiere über die Tastatur.",
+  // service-not-allowed: Siri/Diktierfunktion aus (iOS) bzw. Sprachdienst nicht erreichbar – nicht das Mikrofon
+  speechOff: "Die Spracherkennung ist aus: Einstellungen → Allgemein → Tastatur → Diktierfunktion (oder Siri) einschalten.",
+  speechOffWeb: "Die Spracherkennung ist hier gerade nicht verfügbar. Tipp einfach, ich versuche es später wieder.",
   // CR3: Browser ohne Spracherkennung
   noListen: "In diesem Browser kann ich nicht zuhören. Tipp einfach, oder öffne mich in Chrome oder Safari.",
 });
 
 let defaultAnrede = "Boss";
+let deviceName = "iPhone";
 
 /** Anrede, die line() für {A} nimmt, wenn vars.A fehlt (app setzt sie beim Start und bei jeder Änderung). */
 export function setAnrede(name) {
   defaultAnrede = String(name ?? "").trim() || "Boss";
 }
+
+/** Gerät für {G} in den Sätzen und im Gehirn („iPhone“, „iPad“, „Handy“, „Tablet“, „Computer“; CR3.1). */
+export function setDevice(name) {
+  deviceName = String(name ?? "").trim() || "Gerät";
+}
+
+/** @returns {string} */
+export function device() {
+  return deviceName;
+}
+
+const appleDevice = () => deviceName === "iPhone" || deviceName === "iPad";
 
 const anredeOf = (a) => String(a ?? "").trim() || defaultAnrede;
 
@@ -218,6 +252,7 @@ export function line(key, vars = {}) {
   if (tpl == null) return "";
   const v = { ...(vars || {}) };
   v.A = anredeOf(v.A);
+  if (v.G == null || String(v.G).trim() === "") v.G = deviceName;
   const plainTpl = LINES[`${key}Plain`];
   if (plainTpl != null) {
     const needed = [...tpl.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).filter((n) => n !== "A");
@@ -545,8 +580,8 @@ export function weatherQuery(t0) {
 }
 
 // ---------------------------------------------------------------------------------------------- Seiten (§7.4)
-// Mac DEFAULTS["sites"] (jarvis.py L116-153) wörtlich; Telefon: maps/karten → Apple Karten, WhatsApp → wa.me,
-// Snapchat ohne „web.“.
+// Mac DEFAULTS["sites"] (jarvis.py L116-153) wörtlich; Telefon: maps/karten → Apple Karten (nur iPhone/iPad, sonst
+// Google Maps wie am Mac, siehe siteFor), WhatsApp → wa.me, Snapchat ohne „web.“.
 export const SITES = Object.freeze({
   "youtube": "https://www.youtube.com", "google": "https://www.google.com",
   "gmail": "https://mail.google.com", "mails": "https://mail.google.com",
@@ -640,7 +675,7 @@ function siteUrl(name) {
   const nm = normName(name);
   const bare = nm.replace(BARE_TLD, "");
   const [, url] = closeKey(bare, SITES);
-  if (url) return url;
+  if (url) return siteFor(url);
   const m = SPOKEN_DOMAIN.exec(nm);
   if (m) {
     const host = spokenHost(m[1], m[2]);
@@ -650,8 +685,14 @@ function siteUrl(name) {
 }
 
 function siteLabel(url) {
-  const key = Object.keys(SITES).find((k) => SITES[k] === url);
+  const key = Object.keys(SITES).find((k) => SITES[k] === url || (k === "maps" && url === GOOGLE_MAPS));
   return key ? nice(key) : hostOf(url).replace(/^www\./, "");
+}
+
+// „öffne Karten“: Apple Karten nur auf Apple-Geräten; Android/Rechner bekommen Google Maps (öffnet dort die App)
+const GOOGLE_MAPS = "https://www.google.com/maps";
+function siteFor(url) {
+  return url === SITES.maps && !appleDevice() ? GOOGLE_MAPS : url;
 }
 
 const FOLDER_RX = full("(?:den |die |das |meinen |mein )?(?:ordner|verzeichnis)\\s+(.+)|(.+?)\\s+(?:ordner|verzeichnis)");
@@ -671,13 +712,13 @@ export function openTarget(name, verb = "öffne", search = true) {
   const nm = normName(raw).replace(SITE_OF, "");
   if (!nm || ENDS_ZU_AUS.test(nm)) return null;
   const bare = nm.replace(BARE_TLD, "");
-  if (own(SITES, bare)) return { type: "open_url", url: SITES[bare], label: nice(bare) };
+  if (own(SITES, bare)) return { type: "open_url", url: siteFor(SITES[bare]), label: nice(bare) };
   if (SPOKEN_DOMAIN.test(nm)) {
     const url = siteUrl(nm);
     if (url) return { type: "open_url", url, label: siteLabel(url) };
   }
   const [key, url] = closeKey(bare, SITES);
-  if (url) return { type: "open_url", url, label: nice(key) };
+  if (url) return { type: "open_url", url: siteFor(url), label: nice(key) };
   if (search && /^(öffne|geh|ruf)/.test(String(verb)) && words(nm).length <= 4 && !OPEN_BLOCK.test(nm)) {
     return { type: "web_search", query: nm };
   }
@@ -727,7 +768,7 @@ const MODEL_LEAD = ure("^(?:(?:ey|eh|hey|he|okay|ok|jarvis|boss|so|also|und|äh|
 const MODEL_VERB = ure("^(?:kannst du (?:mir )?)?(?:zeig|zeige|mach|bau|baue|erstell\\w*|render\\w*|generier\\w*|"
   + "projizier\\w*|holo\\w*)\\s+(.*)$");
 const MODEL_ASK_WORD = ure("\\b(modell|model|hologramm|holo)\\b");
-const MODEL_LOOK = ure("^wie sieht (?:ein|eine|einen|der|die|das)? ?(.+?) aus$");
+const MODEL_LOOK = ure("^wie sieht (?:(?:einen|eine|ein|der|die|das)\\s+)?(.+?) aus$");
 const MODEL_OF = ure("\\b(?:von|vom)\\s+(.+)$");
 const MODEL_OBJ_LEAD = ure("^(?:(?:mir|uns|mal|kurz|bitte|doch|eben|schnell|nen|ne)\\s+)*");
 
@@ -1082,7 +1123,7 @@ const MA_UP = ure("\\b(oben|hoch)\\b");
 const MA_DOWN = ure("\\b(unten|runter)\\b");
 const IMG_SHOW_1 = ure("^(?:zeig|zeige)\\s+(?:mir\\s+|uns\\s+)?(?:mal\\s+)?(?:bitte\\s+)?(?:ein(?:e|en)?\\s+|das\\s+|paar\\s+)?"
   + "(?:bild|bilder|foto|fotos|photo)\\s+(?:von|vom|eines|einer|einem|zu|zum|zur)\\s+(.+)$");
-const IMG_SHOW_2 = ure("^wie sieht (?:ein|eine|einen|der|die|das)?\\s*(.+?) aus$");
+const IMG_SHOW_2 = ure("^wie sieht (?:(?:einen|eine|ein|der|die|das)\\s+)?(.+?) aus$");
 const IMG_ARTICLE = ure("^(?:einem|einer|einen|eine|ein|dem|der|den|die|das)\\s+");
 const IMG_CHROME = ure("\\s+(?:in|auf|über|mit) (?:google )?chrome$");
 const IMG_HIDE = full("(?:(?:mach|schließ|schließe|nimm|lösch|lösche|tu|tue)\\s+)?(?:nur\\s+)?(?:das\\s+)?(?:bild|foto)"
@@ -1159,6 +1200,25 @@ const QUIT_NOT = new Set(["musik", "browser", "uhr", "dich", "mich", "das", "es"
   "tür", "auto", "heizung",
   "seite", "bild", "foto", "modell", "model", "kugel", "overlay", "jarvis", "timer", "wecker", "gespräch"]);
 const QUIT_PLACE = ure("\\b(im|in|am|an|auf|von|vom|zum|zur|der|die|das|dem|den|mit)\\b");
+// Telefon-Ersatz für die laufenden Mac-Programme (live quit_targets: nur, was wirklich ein Programm ist). Alles andere
+// („mach die Taschenlampe aus“, „beende den Anruf“) geht wie am Mac an die KI.
+const APP_NAMES = Object.freeze(Object.fromEntries([
+  "spotify", "chrome", "google chrome", "safari", "firefox", "brave", "edge", "microsoft edge", "opera", "arc",
+  "whatsapp", "telegram", "signal", "discord", "slack", "zoom", "teams", "microsoft teams", "skype", "facetime",
+  "nachrichten", "messages", "mail", "outlook", "thunderbird", "word", "excel", "powerpoint", "keynote", "pages",
+  "numbers", "notion", "obsidian", "evernote", "notizen", "notes", "erinnerungen", "kalender", "finder", "vorschau",
+  "preview", "terminal", "iterm", "xcode", "vs code", "visual studio code", "cursor", "figma", "photoshop",
+  "illustrator", "premiere", "final cut", "logic", "garageband", "imovie", "capcut", "itunes", "apple music",
+  "podcasts", "fotos", "photos", "quicktime", "vlc", "obs", "steam", "app store", "systemeinstellungen", "dropbox",
+  "onedrive", "1password", "bitwarden", "docker", "postman", "chatgpt", "claude", "tradingview", "netflix",
+  "youtube", "instagram", "tiktok", "twitch", "prime video", "disney plus",
+].map((n) => [n, true])));
+
+function isKnownApp(name) {
+  const nm = String(name ?? "").trim();
+  if (!nm) return false;
+  return !!closeKey(nm, APP_NAMES)[1] || !!closeKey(nm, SITES)[1];
+}
 // #33 öffne …, #35 ruf <Nummer> an, #34 zeig dich
 const OPEN_RX = ure("^(öffne|öffnen|öffnet|öffnest|starte|start|zeig mir|zeige mir|mach|mache|geh auf|gehe auf|ruf|rufe)"
   + "\\s+(?:mir\\s+)?(?:mal\\s+)?(?:bitte\\s+)?(?:mal\\s+)?(?:kurz\\s+)?(.+?)(?:\\s+(?:auf|an|bitte|mal))*$");
@@ -1168,8 +1228,9 @@ const SHOW_ME = ure("\\b(zeig dich|overlay an|komm zurück)\\b");
 
 // CR1.4 Gratis-Modus (ohne Gehirn): „merk dir …“, „vergiss …“, „was hast du dir gemerkt“, WhatsApp-Entwurf
 const LEAD_WORDS = "(?:(?:ey|eh|hey|okay|ok|also|so|jarvis|boss|und|bitte)[\\s,.!?:;-]+)*";
-const NOTE_REMEMBER = ure(`^\\W*${LEAD_WORDS}(?:merk|merke)\\s+dir\\b[\\s,.:;-]*(?:dass\\s+)?(.*)$`, "i");
-const NOTE_TEACH_1 = ure(`^\\W*${LEAD_WORDS}(?:bring|bringe)\\s+dir\\s+bei\\b[\\s,.:;-]*(?:dass\\s+)?(.*)$`, "i");
+// „dass …“ bleibt am Notizsatz (sonst „Ich meinen Kaffee schwarz trinke“); vorgelesen wird er in der Du-Form
+const NOTE_REMEMBER = ure(`^\\W*${LEAD_WORDS}(?:merk|merke)\\s+dir\\b[\\s,.:;-]*(.*)$`, "i");
+const NOTE_TEACH_1 = ure(`^\\W*${LEAD_WORDS}(?:bring|bringe)\\s+dir\\s+bei\\b[\\s,.:;-]*(.*)$`, "i");
 const NOTE_TEACH_2 = ure(`^\\W*${LEAD_WORDS}(?:bring|bringe)\\s+dir\\s+(.+?)\\s+bei\\W*$`, "i");
 const NOTE_FORGET = ure(`^\\W*${LEAD_WORDS}(?:vergiss|vergesse)\\b[\\s,.:;-]*(?:bitte\\s+)?(?:die\\s+notiz\\b[\\s,.:;-]*|dass\\s+|`
   + "was ich (?:dir )?(?:über|zu)\\s+)?(.*)$", "i");
@@ -1201,12 +1262,102 @@ function cleanSpoken(s) {
   return String(s ?? "").replace(/^[\s,.:;–-]+/u, "").replace(/[\s,;:–-]+$/u, "").trim();
 }
 
+// ---- Ich-Form → Du-Form fürs Vorlesen gemerkter Sätze („dass ich meinen Kaffee schwarz trinke“ → „dass du deinen
+// Kaffee schwarz trinkst“). Nur Pronomen und das Verb zu „ich“; alles andere bleibt, wie er es gesagt hat.
+const PRONOUN_DU = Object.freeze({ ich: "du", mich: "dich", mir: "dir", mein: "dein", meine: "deine", meinen: "deinen",
+  meinem: "deinem", meiner: "deiner", meines: "deines", meins: "deins" });
+const VERB_DU = Object.freeze({ bin: "bist", habe: "hast", hab: "hast", kann: "kannst", will: "willst", muss: "musst",
+  darf: "darfst", soll: "sollst", mag: "magst", weiß: "weißt", werde: "wirst", möchte: "möchtest", tue: "tust", tu: "tust",
+  war: "warst", hatte: "hattest", esse: "isst", lese: "liest", sehe: "siehst", spreche: "sprichst", nehme: "nimmst",
+  gebe: "gibst", helfe: "hilfst", treffe: "triffst", vergesse: "vergisst", fahre: "fährst", schlafe: "schläfst",
+  laufe: "läufst", trage: "trägst", halte: "hältst", lasse: "lässt", falle: "fällst", fange: "fängst", wasche: "wäschst",
+  werfe: "wirfst", breche: "brichst", empfehle: "empfiehlst", trete: "trittst", lade: "lädst", rate: "rätst",
+  brate: "brätst", stoße: "stößt", wachse: "wächst", verlasse: "verlässt", erfahre: "erfährst", weiss: "weisst" });
+const SUBORDINATE = new Set(["dass", "wenn", "weil", "ob", "obwohl", "damit", "als", "falls", "sobald", "nachdem", "bevor",
+  "während", "da", "seit", "seitdem", "bis", "wie", "wo", "was"]);
+const CONJ_DU = new Set(["und", "oder", "aber", "sowie"]);
+const DETERMINER_DU = /^(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|eines|mein\p{L}*|dein\p{L}*|sein\p{L}*|ihr\p{L}*|unser\p{L}*|kein\p{L}*|dies\p{L}*|jed\p{L}*|viel\p{L}*|all\p{L}*)$/u;
+const VERB_PREFIXES = ["zurück", "weiter", "zusammen", "auf", "an", "ab", "aus", "ein", "mit", "nach", "vor", "zu", "weg",
+  "los", "fest", "her", "hin", "fern", "dabei", "um", "be", "ver", "er", "ent", "ge", "über", "unter"];
+
+function verbDu(word) {
+  const w = String(word ?? "");
+  const low = w.toLowerCase();
+  if (own(VERB_DU, low)) return keepCase(w, VERB_DU[low]);
+  for (const p of VERB_PREFIXES) {                       // „anfange“ → „anfängst“, „mitnehme“ → „mitnimmst“
+    if (low.startsWith(p) && own(VERB_DU, low.slice(p.length))) return keepCase(w, p + VERB_DU[low.slice(p.length)]);
+  }
+  if (!/^[a-zäöüß]{3,}e$/u.test(low)) return null;        // nur „…e“ ist sicher die ich-Form
+  const stem = low.slice(0, -1);
+  let du;
+  if (/(s|ß|z|x)$/u.test(stem)) du = `${stem}t`;          // heiße → heißt
+  else if (/(t|d)$/u.test(stem) || /(ch|[^aeiouäöülrhmn])[mn]$/u.test(stem)) du = `${stem}est`;   // arbeite, finde, atme, rechne
+  else du = `${stem}st`;                                   // trinke → trinkst
+  return keepCase(w, du);
+}
+
+function keepCase(orig, repl) {
+  return /^[A-ZÄÖÜ]/u.test(orig) ? repl[0].toUpperCase() + repl.slice(1) : repl;
+}
+
+/** Notiz in der Du-Form vorlesen (Pronomen ich/mein → du/dein, Verb zu „ich“ angepasst). */
+export function toDuForm(text) {
+  const src = String(text ?? "").trim();
+  if (!src) return src;
+  const toks = src.split(/(\s+|[,;:.!?]+)/u);
+  const isWord = (t) => /^[\p{L}]+$/u.test(t);
+  const lower = (i) => toks[i].toLowerCase();
+  const wordIdx = toks.map((t, i) => (isWord(t) ? i : -1)).filter((i) => i >= 0);
+  const dass = wordIdx.length && lower(wordIdx[0]) === "dass";
+  // je Teilsatz (bis Komma/Semikolon): Nebensatz → Verb am Ende, „Ich trinke“ → 2. Wort, „Morgen arbeite ich“ → davor
+  const verbAt = new Set();
+  let seg = [];
+  const flush = () => {
+    const ich = seg.findIndex((i) => lower(i) === "ich");
+    if (ich >= 0) {
+      if (SUBORDINATE.has(lower(seg[0])) && seg.length > ich + 1) {
+        verbAt.add(seg[seg.length - 1]);
+        // „dass ich X trinke und Y höre“: auch das Verb vor „und/oder“ (visual-ux-7) – aber nicht in Reihen wie
+        // „große und kleine Hunde“ oder „Tee und Kaffee“
+        for (let k = ich + 2; k < seg.length - 1; k++) {
+          if (!CONJ_DU.has(lower(seg[k]))) continue;
+          const cand = seg[k - 1];
+          const next = seg[k + 1];
+          if (/^[A-ZÄÖÜ]/u.test(toks[cand])) continue;                       // Nomen
+          if (k - 2 >= 0 && DETERMINER_DU.test(lower(seg[k - 2]))) continue;   // „die große und …“
+          if (/e$/u.test(lower(next)) && next !== seg[seg.length - 1]) continue;   // „… und kleine Hunde“
+          verbAt.add(cand);
+        }
+      } else if (ich === 0 && seg.length > 1) verbAt.add(seg[1]);
+      else if (ich > 0) verbAt.add(seg[ich - 1]);
+    }
+    seg = [];
+  };
+  toks.forEach((t, i) => {
+    if (isWord(t)) seg.push(i);
+    else if (/[,;:.!?]/u.test(t)) flush();
+  });
+  flush();
+  for (const i of wordIdx) {
+    const low = lower(i);
+    if (verbAt.has(i)) {
+      const v = verbDu(toks[i]);
+      if (v) { toks[i] = v; continue; }
+    }
+    if (own(PRONOUN_DU, low)) toks[i] = keepCase(toks[i], PRONOUN_DU[low]);
+  }
+  let out = toks.join("");
+  if (dass) out = out.replace(/^Dass\b/u, "dass");
+  return out;
+}
+
 /** Gratis-Modus „merk dir …“ & Co.; null = kein Treffer. */
 function freeNotes(text, t, ctx, A, r) {
   let m = NOTE_REMEMBER.exec(text) || NOTE_TEACH_1.exec(text) || NOTE_TEACH_2.exec(text);
   if (m) {
     const what = cleanSpoken(m[1]).replace(/[.!?]+$/u, "");
-    if (!what || NOTE_VAGUE.has(what.toLowerCase())) return r(line("noteEmpty", { A }));
+    const core = what.replace(/^dass\b\s*/iu, "");
+    if (!core || NOTE_VAGUE.has(core.toLowerCase()) || NOTE_VAGUE.has(what.toLowerCase())) return r(line("noteEmpty", { A }));
     return r("", [{ type: "remember", text: firstUpper(what) }]);
   }
   m = NOTE_FORGET.exec(text);
@@ -1221,10 +1372,148 @@ function freeNotes(text, t, ctx, A, r) {
     try { facts = typeof ctx.facts === "function" ? ctx.facts() : (Array.isArray(ctx.facts) ? ctx.facts : []); } catch { facts = []; }
     const texts = (Array.isArray(facts) ? facts : []).map((f) => String((f && f.text) ?? f ?? "").trim()).filter(Boolean);
     if (!texts.length) return r(line("notesNone", { A }));
-    const recent = texts.slice(-5).map((x) => x.replace(/[.!?]+$/u, ""));
+    const recent = texts.slice(-5).map((x) => toDuForm(x.replace(/[.!?]+$/u, "")));
     let say = line("notesList", { A, list: recent.join("; ") });
     if (texts.length > recent.length) say += ` ${line("notesMore", { A, n: texts.length - recent.length })}`;
     return r(say);
+  }
+  return null;
+}
+
+// ---- CR1.4 Konto und Termine ohne Gehirn: genau die Sätze, die die leeren Panels vorschlagen
+const AMOUNT = "([-+−]?\\s?\\d[\\d.,]*(?:\\s\\d{3})*)\\s*(?:€|euro|eur)?";
+const KONTO_SET = [
+  ure(`^\\W*(?:bitte\\s+)?(?:(?:mein|der)\\s+)?kontostand\\s*(?:ist|beträgt|liegt\\s+bei|steht\\s+(?:bei|auf)|sind|:)?\\s*`
+    + `(?:jetzt|gerade|aktuell|heute)?\\s*(?:bei\\s+)?${AMOUNT}\\W*$`, "i"),
+  ure(`^\\W*(?:bitte\\s+)?(?:setz|setze|stell|stelle|trag|trage)\\s+(?:mir\\s+)?(?:meinen|den)\\s+kontostand\\s+(?:auf|mit)\\s+${AMOUNT}`
+    + `(?:\\s+ein)?\\W*$`, "i"),
+];
+const TERMIN_RX = [
+  ure("^\\W*(?:bitte\\s+)?(?:trag|trage)\\s+(?:mir\\s+)?(?:bitte\\s+)?(?:mal\\s+)?(?:einen\\s+|den\\s+)?termin\\s+ein\\s*[:,]?\\s+(.+?)\\W*$", "i"),
+  ure("^\\W*(?:bitte\\s+)?(?:trag|trage)\\s+(?:mir\\s+)?(?:bitte\\s+)?(?:mal\\s+)?(.+?)\\s+(?:in\\s+(?:den|meinen)\\s+kalender\\s+|"
+    + "in\\s+(?:die|meine)\\s+termin(?:e|liste)\\s+)?ein\\W*$", "i"),
+  ure("^\\W*(?:neuer|neuen)\\s+termin\\s*[:,]?\\s+(.+?)\\W*$", "i"),
+  ure("^\\W*(?:mach|mache|leg|lege)\\s+(?:mir\\s+)?(?:bitte\\s+)?(?:einen\\s+)?termin\\s+(?:an\\s+)?[:,]?\\s*(.+?)(?:\\s+an)?\\W*$", "i"),
+];
+const DAY_WORDS = Object.freeze({ heute: 0, morgen: 1, "übermorgen": 2 });
+const MONTH_RX = MONTHS.map((m) => m.toLowerCase()).join("|");
+const NUM_WORD_RX = "(?:null|ein|eins|eine|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|dreizehn|vierzehn|"
+  + "fünfzehn|sechzehn|siebzehn|achtzehn|neunzehn|zwanzig|einundzwanzig|zweiundzwanzig|dreiundzwanzig|dreißig|"
+  + "vierzig|fünfzig|\\d{1,2})";
+const T_ALLDAY = ure("\\b(?:ganztägig|ganztags|den ganzen tag)\\b", "i");
+const T_TIME = ure(`\\b(?:um|gegen|ab)?\\s*(${NUM_WORD_RX})(?:[:.](\\d{2}))?\\s*uhr(?:\\s+(${NUM_WORD_RX}))?\\b`, "i");
+const T_TIME_UM = ure("\\bum\\s+(\\d{1,2})(?:[:.](\\d{2}))?\\b", "i");
+const T_PM = ure("\\b(?:nachmittags|abends|am nachmittag|am abend|pm)\\b", "i");
+const T_DAYWORD = ure("\\b(übermorgen|morgen|heute)\\b", "i");
+const T_WEEKDAY = ure(`\\b(?:am\\s+|nächsten\\s+|kommenden\\s+|diesen\\s+)?(${WEEKDAYS.map((w) => w.toLowerCase()).join("|")})\\b`, "i");
+const T_DATE_NUM = ure("\\b(?:am\\s+)?(\\d{1,2})\\.\\s?(\\d{1,2})\\.(?:\\s?(\\d{4}|\\d{2})\\b)?", "i");
+const T_DATE_MON = ure(`\\b(?:am\\s+)?(\\d{1,2})\\.?\\s+(${MONTH_RX})(?:\\s+(\\d{4}))?\\b`, "i");
+const T_EDGE = ure("^(?:(?:einen|ein|den|die|das|termin|am|um|für|beim|bei|zum|zur|mir|bitte|mal|und|,)\\s+)+|"
+  + "(?:\\s+(?:am|um|für|und|bitte|termin|ein))+$", "gi");
+
+function parseAmountSpoken(raw) {
+  let s = String(raw ?? "").replace(/−/g, "-").replace(/\s+/g, "");
+  if (!s) return null;
+  if (/^[-+]?\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, "");
+  else s = s.replace(",", ".");
+  s = s.replace(/[.,]$/, "");
+  if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function euroText(n) {
+  const frac = Math.round(Math.abs(n) * 100) % 100 !== 0;
+  return `${n.toLocaleString("de-DE", { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 })} Euro`;
+}
+
+/** „Zahnarzt Donnerstag um 15 Uhr“ → { titel, wann, phrase } | { needTime: true } | null (kein Termin). */
+export function parseTermin(body, now = new Date()) {
+  let rest = ` ${String(body ?? "").trim()} `;
+  let m;
+  let allDay = false;
+  if (T_ALLDAY.test(rest)) { allDay = true; rest = rest.replace(T_ALLDAY, " "); }
+  let h = null, mi = 0;
+  if ((m = T_TIME.exec(rest))) {
+    h = parseNumber(m[1]);
+    mi = m[2] ? Number(m[2]) : m[3] ? parseNumber(m[3]) : 0;
+    rest = rest.replace(m[0], " ");
+  } else if ((m = T_TIME_UM.exec(rest))) {
+    h = Number(m[1]);
+    mi = m[2] ? Number(m[2]) : 0;
+    rest = rest.replace(m[0], " ");
+  }
+  if (h != null && T_PM.test(rest) && h < 12) h += 12;
+  rest = rest.replace(T_PM, " ");
+  if (h != null && (!(h >= 0 && h <= 23) || !(mi >= 0 && mi <= 59))) return null;
+  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let date = null;
+  let byWeekday = false;
+  if ((m = T_DATE_MON.exec(rest))) {
+    const mon = MONTHS.findIndex((x) => x.toLowerCase() === m[2].toLowerCase());
+    let y = m[3] ? Number(m[3]) : now.getFullYear();
+    date = new Date(y, mon, Number(m[1]));
+    if (!m[3] && date < base) date = new Date(y + 1, mon, Number(m[1]));
+    rest = rest.replace(m[0], " ");
+  } else if ((m = T_DATE_NUM.exec(rest))) {
+    let y = m[3] ? Number(m[3]) : now.getFullYear();
+    if (y < 100) y += 2000;
+    date = new Date(y, Number(m[2]) - 1, Number(m[1]));
+    if (!m[3] && date < base) date = new Date(y + 1, Number(m[2]) - 1, Number(m[1]));
+    if (date.getMonth() !== Number(m[2]) - 1) return null;
+    rest = rest.replace(m[0], " ");
+  } else if ((m = T_DAYWORD.exec(rest))) {
+    date = new Date(base.getTime());
+    date.setDate(date.getDate() + DAY_WORDS[m[1].toLowerCase()]);
+    rest = rest.replace(m[0], " ");
+  } else if ((m = T_WEEKDAY.exec(rest))) {
+    const wd = WEEKDAYS.findIndex((x) => x.toLowerCase() === m[1].toLowerCase());
+    let diff = (wd - now.getDay() + 7) % 7;
+    if (diff === 0) {
+      const later = h != null && (h * 60 + mi) > (now.getHours() * 60 + now.getMinutes());
+      if (!later) diff = 7;
+    }
+    date = new Date(base.getTime());
+    date.setDate(date.getDate() + diff);
+    byWeekday = true;
+    rest = rest.replace(m[0], " ");
+  }
+  if (!date && h == null) return null;                    // weder Tag noch Uhrzeit: kein Termin-Satz
+  if (!date) {                                            // nur Uhrzeit: heute, sonst morgen
+    date = new Date(base.getTime());
+    if (h * 60 + mi <= now.getHours() * 60 + now.getMinutes()) date.setDate(date.getDate() + 1);
+  }
+  if (h == null && !allDay) return { needTime: true };
+  let titel = squash(rest.replace(/[,;:]/g, " ")).replace(T_EDGE, "").trim();
+  titel = titel ? titel[0].toUpperCase() + titel.slice(1) : "Termin";
+  const ymd = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  const wann = allDay && h == null ? ymd : `${ymd}T${pad2(h)}:${pad2(mi)}`;
+  const days = Math.round((date - base) / 86400e3);
+  const day = days === 0 ? "heute" : days === 1 ? "morgen" : byWeekday && days === 7 ? `nächsten ${WEEKDAYS[date.getDay()]}`
+    : days > 0 && days < 7 && (byWeekday || days > 2) ? `am ${WEEKDAYS[date.getDay()]}` : days === 2 ? "übermorgen"
+      : `am ${date.getDate()}. ${MONTHS[date.getMonth()]}`;
+  const time = h == null ? "ganztägig" : `um ${h} Uhr${mi ? ` ${mi}` : ""}`;
+  return { titel: titel.slice(0, 80), wann, phrase: `${day} ${time}` };
+}
+
+/** Gratis-Modus: Kontostand setzen, Termin eintragen; null = kein Treffer. */
+function freeKontoTermin(raw, now, A, r) {
+  const text = String(raw ?? "").trim();
+  for (const rx of KONTO_SET) {
+    const m = rx.exec(text);
+    if (!m) continue;
+    const n = parseAmountSpoken(m[1]);
+    if (n == null) return r(line("kontoValue", { A }));
+    return r(line("kontoSaid", { A, betrag: euroText(n) }), [{ type: "kontostand", betrag: n }]);
+  }
+  for (const rx of TERMIN_RX) {
+    const m = rx.exec(text);
+    if (!m) continue;
+    const t = parseTermin(m[1], now);
+    if (!t) continue;
+    if (t.needTime) return r(line("terminValue", { A }));
+    return r(line("terminSaid", { A, titel: t.titel, wann: t.phrase }), [{ type: "termin", titel: t.titel, wann: t.wann }]);
   }
   return null;
 }
@@ -1250,7 +1539,7 @@ function quitNames(spoken) {
   for (const part of String(spoken ?? "").toLowerCase().split(QUIT_SPLIT)) {
     let nm = normName(part.trim().replace(QUIT_APP_LEAD, ""));
     nm = nm.replace(QUIT_APP_TAIL, "").trim();
-    if (!nm || QUIT_NOT.has(nm) || words(nm).length > 3 || QUIT_PLACE.test(nm)) continue;
+    if (!nm || QUIT_NOT.has(nm) || words(nm).length > 3 || QUIT_PLACE.test(nm) || !isKnownApp(nm)) continue;
     out.push(nm);
   }
   return out;
@@ -1274,7 +1563,7 @@ export function quickIntent(text, ctx = {}) {
   const r = (say = "", actions = [], extra = {}) => ({
     say, actions, followUp: false, special: null, ui: null, ...extra,
   });
-  const music = () => r(line("macOnlyMusic", { A }));
+  const music = () => r(line("macOnlyMusic", { A }), [], { macOnly: "music" });
   const raw = String(text ?? "");
   let t = norm(raw);
   if (!t) return null;
@@ -1327,6 +1616,9 @@ export function quickIntent(text, ctx = {}) {
     if (sub && sub.actions.length && sub.actions.every((a) => CLOSE_COMBO_TYPES.has(a.type))) {
       return r(sub.say, sub.actions, { ui: "hide" });
     }
+    // „mach die Musik aus und geh schlafen“: Mac erledigt Ton/Medien und blendet aus (live L3353); das Telefon sagt
+    // ehrlich, dass Musik der Mac macht, und blendet trotzdem aus
+    if (sub && sub.macOnly === "music") return r(sub.say, [], { ui: "hide" });
     if (sub === null && CLOSE_AT_START.test(t.replace(CLOSE_LEAD, ""))
       && words(rest2).length <= 3) return r("", [], { ui: "hide_fast" });
     return null;
@@ -1356,6 +1648,11 @@ export function quickIntent(text, ctx = {}) {
   const now = c.now instanceof Date ? c.now : new Date(c.now ?? Date.now());
   if (TIME_Q.test(t)) return r(sayTime(now));
   if (DATE_Q.test(t)) return r(sayDate(now));
+  // CR1.4 Kontostand und Termine ohne Gehirn (mit Gehirn überlegt das die KI, wie am Mac)
+  if (free) {
+    const kt = freeKontoTermin(raw, now, A, r);
+    if (kt) return kt;
+  }
   // CR1.4 WhatsApp-Entwurf ohne Gehirn
   if (free && WA_WORD.test(t)) {
     const wa = freeWhatsApp(raw, r);

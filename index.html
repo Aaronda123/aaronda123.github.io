@@ -5,11 +5,12 @@
 <html lang="de" data-theme="mac">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://upload.wikimedia.org; media-src 'self' blob: data:; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://*.tts.speech.microsoft.com https://*.stt.speech.microsoft.com https://api.binance.com https://api.coingecko.com https://api.frankfurter.app https://geocoding-api.open-meteo.com https://api.open-meteo.com https://de.wikipedia.org https://en.wikipedia.org; worker-src 'self'; manifest-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://upload.wikimedia.org; media-src 'self' blob: data:; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://*.tts.speech.microsoft.com https://*.stt.speech.microsoft.com https://api.binance.com https://api.coingecko.com https://api.frankfurter.app https://geocoding-api.open-meteo.com https://api.open-meteo.com https://de.wikipedia.org https://en.wikipedia.org; worker-src 'self'; manifest-src 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>JARVIS</title>
 <meta name="description" content="J.A.R.V.I.S. – persönlicher Sprachassistent">
 <meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark">
 <meta name="format-detection" content="telephone=no">
@@ -20,9 +21,8 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@500;600;700&display=swap">
+<link rel="preload" href="fonts/orbitron-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/rajdhani-600-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="state-loading">
@@ -183,10 +183,10 @@
         </div>
         <label for="f-gemini">Gemini-Schlüssel (kostenlos)</label>
         <input id="f-gemini" type="password" placeholder="AIza…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-        <p class="hint">Kostenlos: aistudio.google.com/apikey öffnen, mit deinem Google-Konto anmelden, „API-Schlüssel erstellen“ tippen, Schlüssel hier einfügen. Keine Zahlung nötig. Hinweis: Im kostenlosen Tarif darf Google die Gespräche zur Verbesserung seiner Dienste nutzen.</p>
+        <p class="hint">Kostenlos: aistudio.google.com/apikey öffnen, mit deinem Google-Konto anmelden, „API-Schlüssel erstellen“ tippen, Schlüssel hier einfügen. Keine Zahlung nötig. Hinweis: Im kostenlosen Tarif darf Google die Gespräche zur Verbesserung seiner Dienste nutzen und von Menschen prüfen lassen. Mit jeder Frage gehen auch Gedächtnis und Notizen mit (Termine und Konto nur, wenn du danach fragst) – speichere darin keine Geheimnisse wie PINs oder Passwörter.</p>
         <label for="f-anthropic">Claude-API-Schlüssel (optional, kostenpflichtig)</label>
         <input id="f-anthropic" type="password" placeholder="sk-ant-…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-        <p class="hint">console.anthropic.com → API Keys. Abrechnung pro Gespräch, meist ein paar Cent. Beste Qualität, wie am Mac.</p>
+        <p class="hint">console.anthropic.com → API Keys. Abrechnung pro Gespräch, meist ein paar Cent. Beste Qualität, wie am Mac. Mit jeder Frage gehen Gedächtnis, Notizen, Termine und Konto an Claude mit.</p>
         <button type="button" data-cmd="brain_test">Testen</button>
       </section>
 
@@ -196,7 +196,7 @@
         <select id="f-preset">
           <option value="geraet">Gerätestimme (kostenlos)</option>
           <option value="butler">Butler (Azure, optional) – tief, ruhig wie am Mac</option>
-          <option value="florian">Florian (Azure, optional) – deine frühere Stimme</option>
+          <option value="florian">Florian (Azure, optional) – ruhig und klar</option>
           <option value="killian">Killian (Azure, optional) – klar und sachlich</option>
           <option value="andrew">Andrew (Azure, optional) – Deutsch mit leichtem Akzent</option>
         </select>
@@ -236,7 +236,12 @@
         <input id="f-wohnort" type="text" autocomplete="off" autocapitalize="words" spellcheck="false">
         <label for="f-gedaechtnis">Gedächtnis – was Jarvis über dich wissen soll</label>
         <textarea id="f-gedaechtnis" rows="5"></textarea>
-        <button type="button" class="link" data-cmd="open_data">Gespeichertes ansehen</button>
+      </section>
+
+      <section class="panel" id="sec-data">
+        <header><span class="tag">DATEN</span></header>
+        <p class="hint first">Was Jarvis sich gemerkt hat, Kurzbefehle, Termine, Konto und Gespräch – ansehen, löschen, Konto eintragen.</p>
+        <button type="button" data-cmd="open_data">Daten ansehen (Notizen, Termine, Konto)</button>
       </section>
 
       <section class="panel" id="sec-wake">
@@ -278,14 +283,21 @@
 
       <section class="panel" id="sec-links">
         <header><span class="tag">SETUP-LINK</span></header>
+        <p class="hint first">Überträgt Profil, Einstellungen, Notizen und Kurzbefehle auf ein anderes Gerät oder in deinen Kurzbefehl – ohne Schlüssel.</p>
         <div class="btnrow">
           <button type="button" data-cmd="copy_setup_link">Setup-Link kopieren</button>
           <button type="button" data-cmd="copy_shortcut_link">Kurzbefehl-Link kopieren</button>
         </div>
-        <p class="hint warn">Die Links enthalten deine Schlüssel. Nur in deinen eigenen Kurzbefehl einfügen, nicht weitergeben.</p>
+        <label for="f-setup-code">Setup-Code (mit Schlüsseln)</label>
+        <p class="hint">Schlüssel überträgst du mit dem Setup-Code: hier kopieren und auf dem anderen Gerät (oder in Safari) in dieses Feld einfügen. Anders als ein Link landet er nicht im Browser-Verlauf. Nicht weitergeben.</p>
+        <textarea id="f-setup-code" rows="2" placeholder="Setup-Code hier einfügen" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
+        <div class="btnrow">
+          <button type="button" data-cmd="copy_setup_code">Setup-Code kopieren</button>
+          <button type="button" data-cmd="paste_setup_code">Code übernehmen …</button>
+        </div>
       </section>
 
-      <p class="hint center">Schlüssel und Profil bleiben nur auf diesem Gerät gespeichert.</p>
+      <p class="hint center">Schlüssel und Profil bleiben nur auf diesem Gerät gespeichert. Mit einer Frage an das Gehirn gehen Gedächtnis und Notizen an Google bzw. Anthropic.</p>
       <button type="submit" class="primary">Speichern</button>
     </form>
   </section>
@@ -302,11 +314,10 @@
       </div>
 
       <section class="panel" data-device="ios">
-        <h3>1. Jarvis auf den Home-Bildschirm (Seite 2)</h3>
+        <h3>1. Jarvis auf den Home-Bildschirm</h3>
         <p class="step"><b>1.</b> Öffne in Safari <span id="help-url">die Adresse dieser App</span>.</p>
         <p class="step"><b>2.</b> Tippe auf „Teilen“ (Quadrat mit Pfeil nach oben) → „Zum Home-Bildschirm“ → Name „Jarvis“ → „Hinzufügen“. „Als Web-App öffnen“ bleibt eingeschaltet.</p>
-        <p class="step"><b>3.</b> Halte das neue Jarvis-Symbol gedrückt → „Home-Bildschirm bearbeiten“ → zieh es nach rechts auf die zweite Seite → „Fertig“.</p>
-        <p class="step"><b>4.</b> Öffne Jarvis über das Symbol. Erlaube Mikrofon und Spracherkennung, wenn das iPhone fragt. Ein Schlüssel ist nicht nötig; zum Mitdenken trag unter ⚙ Einstellungen einen kostenlosen Gemini-Schlüssel ein und tippe „Speichern“.</p>
+        <p class="step"><b>3.</b> Öffne Jarvis über das Symbol. Erlaube Mikrofon und Spracherkennung, wenn das iPhone fragt. Ein Schlüssel ist nicht nötig; zum Mitdenken trag unter ⚙ Einstellungen einen kostenlosen Gemini-Schlüssel ein und tippe „Speichern“.</p>
       </section>
 
       <section class="panel" data-device="android" hidden>
@@ -325,22 +336,34 @@
 
       <section class="panel">
         <h3>2. „Hey Jarvis“, während Jarvis offen ist</h3>
-        <p>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Verpiss dich und bleib still im Hintergrund offen“). Der Bildschirm bleibt dafür an; am besten hängt das iPhone am Ladekabel. Sperrst du das iPhone oder wechselst die App, hört Jarvis nicht mehr zu.</p>
+        <p data-device="ios">Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Der Bildschirm bleibt dafür an; am besten hängt das iPhone am Ladekabel. Sperrst du das iPhone oder wechselst die App, hört Jarvis nicht mehr zu.</p>
+        <p data-device="android" hidden>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Der Bildschirm bleibt dafür an; am besten hängt das Handy am Ladekabel. Sperrst du das Handy oder wechselst die App, hört Jarvis nicht mehr zu. Android spielt beim Start der Spracherkennung einen kurzen Ton; Jarvis startet sie darum erst, wenn jemand spricht.</p>
+        <p data-device="desktop" hidden>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, solange der Tab mit Jarvis offen und sichtbar ist, auch im schwarzen Modus („☾ Hintergrund“). In einem Hintergrund-Tab oder minimierten Fenster hört Jarvis nicht zu. „Bildschirm wach halten“ ist am Computer zuerst aus, damit Bildschirmschoner und Sperre greifen.</p>
       </section>
 
       <section class="panel" data-device="ios">
         <h3>3. „Hey Jarvis“, wenn Jarvis zu ist (iOS 18 oder neuer)</h3>
         <p>Das iPhone selbst lauscht dann auf deinen Satz und öffnet Jarvis.</p>
-        <p class="step"><b>1.</b> Tippe in Jarvis unter ⚙ Einstellungen auf „Kurzbefehl-Link kopieren“.</p>
+        <p class="step"><b>1.</b> Tippe in Jarvis unter ⚙ Einstellungen → SETUP-LINK auf „Kurzbefehl-Link kopieren“.</p>
         <p class="step"><b>2.</b> Öffne die App „Kurzbefehle“ → „+“ → „Aktion hinzufügen“ → suche „URL öffnen“ → tippe auf „URL“ und füge den kopierten Link ein. Nenne den Kurzbefehl „Jarvis“ → „Fertig“.</p>
         <p class="step"><b>3.</b> Öffne Einstellungen → Bedienungshilfen → Sprachkurzbefehle → „Sprachkurzbefehle einrichten“ (bzw. „Aktion hinzufügen“) → unter „Kurzbefehle“ „Jarvis“ wählen → sag dreimal deutlich „Hey Jarvis“ → „Fertig“. Soll auch „Jarvis“ allein gehen, leg einen zweiten Sprachkurzbefehl mit dem Satz „Jarvis“ an.</p>
-        <p class="step"><b>4.</b> Test: Sag „Hey Jarvis“. Das iPhone öffnet Jarvis (gesperrt: erst entsperren), Jarvis sagt „Ja, Boss?“ und hört zu. Fragt Jarvis „Tippen, um Jarvis zu starten“, tippe einmal auf den Bildschirm – iOS gibt Ton und Mikrofon erst nach einer Berührung frei.</p>
-        <p class="note">Gut zu wissen: Der Kurzbefehl öffnet Jarvis eventuell in Safari statt als Home-Bildschirm-App. Safari hat einen eigenen Speicher; deshalb steckt im Link (nach „#cfg=“) eine Kopie deiner Einstellungen samt Schlüsseln. Gib den Link nicht weiter. Die Bezeichnungen in den iOS-Einstellungen können je nach iOS-Version leicht abweichen. Siehst du in „Kurzbefehle“ bei „App öffnen“ die Web-App „Jarvis“, kannst du stattdessen diese Aktion nehmen und in Jarvis „Beim Öffnen zuhören“ einschalten.</p>
+        <p class="step"><b>4.</b> Test: Sag „Hey Jarvis“. Das iPhone öffnet Jarvis (gesperrt: erst entsperren), Jarvis sagt „Ja, Boss?“ und hört zu. Zeigt Jarvis „Tippen, um Jarvis zu starten“, tippe einmal auf den Bildschirm – iOS gibt Ton und Mikrofon erst nach einer Berührung frei.</p>
+        <p class="note">Gut zu wissen: Der Kurzbefehl öffnet Jarvis eventuell in Safari statt als Home-Bildschirm-App. Safari hat einen eigenen Speicher; deshalb steckt im Link (nach „#cfg=“) eine Kopie deiner Einstellungen, aber nie deine Schlüssel. Beim ersten Öffnen fragt Jarvis, ob er sie übernehmen soll. Soll Jarvis dort auch mitdenken: in der Home-Bildschirm-App unter ⚙ → SETUP-LINK „Setup-Code kopieren“, dann in Safari unter ⚙ → SETUP-LINK einfügen und „Code übernehmen“ tippen. Gib Link und Code nicht weiter. Die Bezeichnungen in den iOS-Einstellungen können je nach iOS-Version leicht abweichen. Siehst du in „Kurzbefehle“ bei „App öffnen“ die Web-App „Jarvis“, kannst du stattdessen diese Aktion nehmen und in Jarvis „Beim Öffnen zuhören“ einschalten.</p>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-device="ios">
         <h3>4. Was Jarvis auf dem iPhone nicht kann</h3>
-        <p>Mails, Google-Kalender, Lautstärke, Musiksteuerung, Mac-Programme öffnen und schließen, den Hotspot und WhatsApp vorlesen erledigt weiter der Jarvis am Mac. Links und Apps öffnet iOS erst nach einem Antippen: Jarvis zeigt sie als Knopf über der Eingabezeile. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links und Apps öffnet iOS erst nach einem Antippen: Jarvis zeigt sie als Knopf über der Eingabezeile. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+      </section>
+
+      <section class="panel" data-device="android" hidden>
+        <h3>3. Was Jarvis auf dem Handy nicht kann</h3>
+        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links und Apps zeigt Jarvis als Knopf über der Eingabezeile; ein Antippen öffnet sie. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+      </section>
+
+      <section class="panel" data-device="desktop" hidden>
+        <h3>3. Was Jarvis im Browser nicht kann</h3>
+        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links zeigt Jarvis als Knopf über der Eingabezeile; ein Klick öffnet sie in einem neuen Tab. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
       </section>
       <button type="button" data-cmd="open_setup">⚙ Einstellungen</button>
     </div>
@@ -371,7 +394,7 @@
           <button type="button" data-cmd="konto_import">Übernehmen</button>
           <button type="button" data-cmd="konto_clear">Leeren</button>
         </div>
-        <p class="hint">Format wie data/einnahmen.json am Mac.</p>
+        <p class="hint">Format: JSON, z. B. {"kontostand": 1200, "ziel_monat": 3000, "quellen": [{"name": "Job", "monat": 800}]}</p>
       </section>
       <section class="panel">
         <header><span class="tag">GESPRÄCH</span></header>
@@ -392,6 +415,22 @@
     </div>
   </section>
 
+  <!-- ===== Blatt: Setup-Link übernehmen? (nichts ändert sich vor „Übernehmen“) ===== -->
+  <section class="sheet" id="sheet-import" hidden aria-label="Setup-Link übernehmen">
+    <div class="sheet-head"><span class="tag">SETUP-LINK</span><button type="button" class="close" data-close="import" aria-label="Nicht übernehmen">✕</button></div>
+    <div class="sheet-body">
+      <section class="panel">
+        <header><span class="tag">EINSTELLUNGEN ÜBERNEHMEN?</span></header>
+        <p class="hint first" id="import-hint">Dieser Link will Jarvis auf diesem Gerät so ändern. Übernimm ihn nur, wenn du ihn selbst erstellt hast.</p>
+        <ul class="import-list" id="import-list"></ul>
+      </section>
+      <div class="btnrow import-btns">
+        <button type="button" data-cmd="import_decline">Nicht übernehmen</button>
+        <button type="button" class="primary" data-cmd="import_accept">Übernehmen</button>
+      </div>
+    </div>
+  </section>
+
   <!-- ===== Schleier: ausgeblendet / still im Hintergrund (zweimal tippen = zurück) ===== -->
   <div id="veil" aria-hidden="true"><span id="veil-hint"></span></div>
 
@@ -407,8 +446,8 @@
 
   <div id="toast" role="status" aria-live="polite"></div>
 
-  <!-- Bildschirm wach halten (Notlösung ohne Wake Lock): stummes schwarzes Video -->
-  <video id="awake-video" src="media/awake.mp4" muted playsinline loop preload="none" aria-hidden="true" tabindex="-1"></video>
+  <!-- Bildschirm wach halten (Notlösung ohne wirksamen Wake Lock): schwarzes Video mit stummer Tonspur, ohne loop -->
+  <video id="awake-video" src="media/awake.mp4" playsinline preload="none" aria-hidden="true" tabindex="-1"></video>
 
   <script src="galaxy.js"></script>
   <script src="neuro.js"></script>

@@ -7,6 +7,12 @@
 // and init() reports storage "memory". Reads tolerate corrupt JSON (defaults, never throw).
 // No secrets and no personal data in this file: personal values only ever come from the setup screen.
 // Regexes ported from jarvis.py are written Unicode-aware by hand here (store.js imports nothing, §2).
+// Round 2: importFromLocation() strips #cfg=/?wake=1 from the address first, then only reads the link (pending, never
+// keys); applySetup() applies it after the user said yes. Keys move only with the pasted Setup-Code (setupCode(),
+// readSetupCode());
+// the history keeps the first message with the notes when it is trimmed and carries webSeen (D18 across reloads);
+// wipe("all") also empties the "jarvis-tts" speech cache (wipeDone()); a "storage" event from another window of the
+// same origin reloads the changed key, so two windows never write back each other's stale state.
 // ==============================================================================================================
 
 /** @typedef {typeof DEFAULT_SETTINGS} Settings  ARCHITECTURE.md §8.2 (frozen snapshot; closingPhrase null = default line, "" = none) */
@@ -157,7 +163,7 @@ let state = {
   shortcuts: [],
   konto: null,
   timers: [],
-  history: { v: 1, updated: 0, messages: [] },
+  history: { v: 1, updated: 0, messages: [], webSeen: false },
   log: [],
   usage: { day: "", input: 0, output: 0, requests: 0 },
   meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0 },
@@ -255,8 +261,19 @@ function coerceSetting(key, value, current) {
   return current;
 }
 
+// Rechner ohne Touch: „Bildschirm wach halten“ ist dort standardmäßig aus (Bildschirmschoner und Sperre sollen greifen).
+function desktopLike() {
+  try {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function" || typeof navigator === "undefined") return false;
+    const ua = String(navigator.userAgent || "");
+    if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints || 0) > 0) return false;
+    return window.matchMedia("(pointer: fine)").matches && !window.matchMedia("(any-pointer: coarse)").matches;
+  } catch { return false; }
+}
+
 function sanitizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
+  if (desktopLike()) out.keepAwake = false;
   if (isObj(raw)) {
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
       if (key === "v" || !(key in raw)) continue;
@@ -324,8 +341,18 @@ function loadHistory(raw) {
     .filter((m) => isObj(m) && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
     .map((m) => ({ role: m.role, content: m.content }));
   while (messages.length && messages[0].role !== "user") messages.shift();
-  while (messages.length > MAX.history) messages.splice(0, 2);
-  return { v: 1, updated: messages.length ? Number(raw.updated) || 0 : 0, messages };
+  trimHistory(messages);
+  return { v: 1, updated: messages.length ? Number(raw.updated) || 0 : 0, messages, webSeen: isObj(raw) && raw.webSeen === true };
+}
+
+/** Kopf der Notizen (notesPrompt), die vor der ersten Nachricht eines Gesprächs stehen. */
+const NOTES_HEAD = "[Das hat ";
+
+// Ältere Paare fallen vorne weg; die erste Nachricht mit den Notizen bleibt stehen (sonst vergisst das Gehirn nach
+// 12 Fragen, was er ihm beigebracht hat – am Mac bleiben sie die ganze Sitzung, api-1).
+function trimHistory(msgs) {
+  const pin = msgs.length > 2 && msgs[0].role === "user" && msgs[0].content.startsWith(NOTES_HEAD) ? 2 : 0;
+  while (msgs.length > MAX.history) msgs.splice(pin, 2);
 }
 
 function loadLog(raw) {
@@ -424,7 +451,53 @@ export function init() {
     const p = globalThis.navigator?.storage?.persist?.();
     if (p && typeof p.catch === "function") p.catch(() => {});
   } catch { /* not supported */ }
+  if (!storageListening && typeof globalThis.addEventListener === "function") {
+    storageListening = true;
+    globalThis.addEventListener("storage", onStorage);
+  }
   return { storage: storageMode, migrated };
+}
+
+// Zweites Fenster derselben Seite (installierte App + Browser-Tab, zwei Tabs): was dort gespeichert wird, gilt hier
+// sofort auch. Sonst schreibt dieses Fenster beim nächsten Speichern seinen alten Stand zurück und löscht z. B. den
+// gerade eingetragenen Schlüssel (robustness-7).
+let storageListening = false;
+function onStorage(e) {
+  if (!e || !ready) return;
+  try { if (e.storageArea && backend && e.storageArea !== backend) return; } catch { /* ignore */ }
+  const key = e.key;
+  if (key === null) {                                   // localStorage.clear() im anderen Fenster
+    for (const k of Object.values(KEYS)) reloadKey(k, rawGet(k));
+    return;
+  }
+  if (!String(key).startsWith("jarvis.v2.")) return;
+  reloadKey(key, e.newValue);
+}
+
+function reloadKey(key, raw) {
+  if (raw === null || raw === undefined) mem.delete(key);
+  else mem.set(key, raw);
+  const val = (fallback) => {
+    if (raw === null || raw === undefined) return fallback;
+    try {
+      const v = JSON.parse(raw);
+      return v == null ? fallback : v;
+    } catch {
+      return fallback;
+    }
+  };
+  switch (key) {
+    case KEYS.settings: state.settings = sanitizeSettings(val({})); emit("settings", state.settings); break;
+    case KEYS.facts: state.facts = loadFacts(val([])); emit("facts", facts()); break;
+    case KEYS.shortcuts: state.shortcuts = loadShortcuts(val([])); emit("shortcuts", shortcuts()); break;
+    case KEYS.konto: state.konto = normKonto(val(null)); emit("konto", konto()); break;
+    case KEYS.timers: state.timers = loadTimers(val([])); emit("timers", timers()); break;
+    case KEYS.history: state.history = loadHistory(val(null)); emit("history", chatHistory()); break;
+    case KEYS.log: state.log = loadLog(val([])); emit("log", logEntries()); break;
+    case KEYS.usage: state.usage = loadUsage(val(null)); emit("usage", usageToday()); break;
+    case KEYS.meta: state.meta = loadMeta(val(null)); break;
+    default: break;
+  }
 }
 
 /** @returns {Settings} frozen snapshot; a new object after every change */
@@ -740,8 +813,9 @@ function normKonto(raw) {
   return k;
 }
 
+// Ohne genannte Zahlen bleiben die Geldfelder leer (null): ein Termin allein erfindet keinen Kontostand 0,00 €.
 function emptyKonto(d) {
-  return { stand: standText(d), kontostand: 0, kontostand_vortag: null, verlauf: [], heute: 0, zahlungen_heute: 0,
+  return { stand: standText(d), kontostand: null, kontostand_vortag: null, verlauf: [], heute: 0, zahlungen_heute: 0,
     tag: dayKey(d), monat: monthKey(d), ziel_monat: 0, quellen: [], krypto: [], konten: [], waehrung: "EUR",
     termine: [], hinweise: [], buchungen: [] };
 }
@@ -769,6 +843,19 @@ function saveKonto() {
 
 function workingKonto(d) {
   return state.konto ? clone(state.konto) : emptyKonto(d);
+}
+
+/**
+ * Enthält das Konto echte Geldangaben (Kontostand, Quellen, Konten, Krypto, Buchungen, Ziel)? Nur Termine: nein.
+ * @param {object|null} k
+ * @returns {boolean}
+ */
+export function kontoHasMoney(k) {
+  if (!isObj(k)) return false;
+  const n = (v) => v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
+  const list = (v) => Array.isArray(v) && v.length > 0;
+  return n(k.kontostand) || list(k.quellen) || list(k.konten) || list(k.krypto) || list(k.buchungen)
+    || (n(k.ziel_monat) && Number(k.ziel_monat) > 0) || (n(k.heute) && Number(k.heute) !== 0);
 }
 
 /** @returns {object|null} */
@@ -1032,17 +1119,36 @@ export function appendTurn(userContent, assistantText, now) {
   ensure();
   const msgs = state.history.messages.slice();
   msgs.push({ role: "user", content: String(userContent ?? "") }, { role: "assistant", content: String(assistantText ?? "") });
-  while (msgs.length > MAX.history) msgs.splice(0, 2);
   while (msgs.length && msgs[0].role !== "user") msgs.shift();
-  state.history = { v: 1, updated: nowMs(now), messages: msgs };
+  trimHistory(msgs);
+  state.history = { v: 1, updated: nowMs(now), messages: msgs, webSeen: !!state.history.webSeen };
   saveHistory();
 }
 
 /** @returns {void} */
 export function clearHistory() {
   ensure();
-  state.history = { v: 1, updated: 0, messages: [] };
+  state.history = { v: 1, updated: 0, messages: [], webSeen: false };
   saveHistory();
+}
+
+/**
+ * Hat eine Antwort DIESES Gesprächs das Web benutzt (Mac web_seen, Lern-Sperre D18)? Liegt mit dem Gespräch im
+ * Speicher, damit die Sperre ein Neuladen übersteht (security-privacy-4).
+ * @returns {boolean}
+ */
+export function conversationWebSeen() {
+  ensure();
+  return !!state.history.webSeen;
+}
+
+/** @param {boolean} on */
+export function setConversationWebSeen(on) {
+  ensure();
+  const v = !!on;
+  if (!!state.history.webSeen === v) return;
+  state.history = { ...state.history, webSeen: v };
+  writeJSON(KEYS.history, state.history);
 }
 
 /** @returns {number} ms epoch of the last turn, 0 if none */
@@ -1178,14 +1284,49 @@ function pageBase() {
   }
 }
 
+// Schlüssel reisen nie in einem Link: der landet im Browser-Verlauf (mit Sync auch im Google-/Microsoft-Konto).
+// Für Schlüssel gibt es den Setup-Code zum Kopieren und Einfügen (security-privacy-3).
+const KEY_FIELDS = Object.freeze(["anthropicKey", "geminiKey", "azureKey"]);
+const CODE_HEAD = "JARVIS-SETUP:";
+
 /**
- * Setup-Link `<base>#cfg=<b64>`; with wake: Kurzbefehl-Link `<base>?wake=1#cfg=<b64>`.
- * @param {{ wake?: boolean, withKeys?: boolean, base?: string }} [opts] base defaults to location.origin + location.pathname
+ * Setup-Link `<base>#cfg=<b64>`; with wake: Kurzbefehl-Link `<base>?wake=1#cfg=<b64>`. Never contains keys.
+ * @param {{ wake?: boolean, base?: string }} [opts] base defaults to location.origin + location.pathname
  * @returns {string}
  */
-export function setupLink({ wake = false, withKeys = true, base } = {}) {
+export function setupLink({ wake = false, base } = {}) {
   const b = typeof base === "string" ? base : pageBase();
-  return `${b}${wake ? "?wake=1" : ""}#cfg=${encodeSetup({ withKeys })}`;
+  return `${b}${wake ? "?wake=1" : ""}#cfg=${encodeSetup({ withKeys: false })}`;
+}
+
+/**
+ * Setup-Code `JARVIS-SETUP:<b64>` with the keys, for copy and paste (nothing lands in the browser history).
+ * @returns {string}
+ */
+export function setupCode() {
+  return CODE_HEAD + encodeSetup({ withKeys: true });
+}
+
+/**
+ * Reads a pasted Setup-Code (also a whole Setup-Link or the bare base64 part).
+ * @param {string} text
+ * @returns {object} payload (not applied: applySetup() after the user said yes)
+ * @throws {Error} Error("cfg") on bad input
+ */
+export function readSetupCode(text) {
+  let t = String(text ?? "").replace(/\s+/g, "");
+  if (!t) throw new Error("cfg");
+  const m = /[#?&]cfg=([^&#]+)/.exec(t);
+  if (m) t = m[1];
+  else if (t.toUpperCase().startsWith(CODE_HEAD)) t = t.slice(CODE_HEAD.length);
+  try { t = decodeURIComponent(t); } catch { /* plain base64url */ }
+  return decodeSetup(t);
+}
+
+function withoutKeys(payload) {
+  const s = { ...payload.s };
+  for (const k of KEY_FIELDS) delete s[k];
+  return { ...payload, s };
 }
 
 function applyImport(payload) {
@@ -1226,34 +1367,35 @@ function applyImport(payload) {
 }
 
 /**
- * Import `#cfg=` once per payload.t, read `?wake=1`, always strip both from the URL (replaceState).
+ * Übernimmt einen Setup-Link, den der Nutzer bestätigt hat (security-privacy-1: nie still beim Öffnen).
+ * @param {object} payload aus importFromLocation().pending / decodeSetup()
+ * @returns {boolean}
+ */
+export function applySetup(payload) {
+  ensure();
+  if (!isObj(payload) || !isObj(payload.s)) return false;
+  applyImport(payload);
+  state.meta.lastImportT = Number(payload.t) || 0;
+  writeJSON(KEYS.meta, state.meta);
+  return true;
+}
+
+/**
+ * Read `#cfg=` (once per payload.t) and `?wake=1`, always strip both from the URL (replaceState). The payload is NOT
+ * applied here: the app asks first and then calls applySetup() (security-privacy-1).
  * @param {Location} [loc]
  * @param {History} [hist]
- * @returns {{ imported: boolean, wake: boolean, error?: string }}
+ * @returns {{ imported: boolean, wake: boolean, pending: object|null, error?: string }}
  */
 export function importFromLocation(loc = globalThis.location, hist = globalThis.history) {
-  ensure();
-  const result = { imported: false, wake: false };
+  const result = { imported: false, wake: false, pending: null };
   if (!loc) return result;
   const search = new URLSearchParams(String(loc.search || "").replace(/^\?/, ""));
   const hashParams = new URLSearchParams(String(loc.hash || "").replace(/^#/, ""));
   const wakeVal = search.has("wake") ? search.get("wake") : null;
   result.wake = wakeVal !== null && wakeVal !== "0" && wakeVal !== "false";
   const cfg = hashParams.get("cfg") ?? search.get("cfg");
-  if (cfg) {
-    try {
-      const payload = decodeSetup(cfg);
-      const t = Number(payload.t);
-      if (t !== state.meta.lastImportT) {
-        applyImport(payload);
-        state.meta.lastImportT = t;
-        writeJSON(KEYS.meta, state.meta);
-        result.imported = true;
-      }
-    } catch {
-      result.error = "cfg";
-    }
-  }
+  // zuerst die Adresse aufräumen, vor allem anderen (security-privacy-3)
   const strip = search.has("wake") || search.has("cfg") || hashParams.has("cfg");
   if (strip) {
     search.delete("wake");
@@ -1262,13 +1404,43 @@ export function importFromLocation(loc = globalThis.location, hist = globalThis.
     const qs = search.toString();
     const hs = hashParams.toString();
     try {
-      hist?.replaceState?.(null, "", (loc.pathname || "/") + (qs ? "?" + qs : "") + (hs ? "#" + hs : ""));
+      hist?.replaceState?.(hist.state ?? null, "", (loc.pathname || "/") + (qs ? "?" + qs : "") + (hs ? "#" + hs : ""));
     } catch { /* ignore */ }
+  }
+  ensure();
+  if (cfg) {
+    try {
+      // ein Link bringt nie Schlüssel mit, auch kein fremder, selbst gebauter (security-privacy-1/-3)
+      const payload = withoutKeys(decodeSetup(cfg));
+      if (Number(payload.t) !== state.meta.lastImportT) result.pending = payload;
+    } catch {
+      result.error = "cfg";
+    }
   }
   return result;
 }
 
 // ---------------------------------------------------------------- wipe
+
+// Stimmen-Cache (voice.js, „jarvis-tts-…“): darin liegen gesprochene Sätze, auch persönliche („Dein Kontostand …“).
+// „Alles löschen“ nimmt ihn mit (security-privacy-5); die App-Dateien im Cache sind nicht persönlich und bleiben.
+let wiping = Promise.resolve();
+function clearSpeechCaches() {
+  try {
+    const cs = globalThis.caches;
+    if (!cs || typeof cs.keys !== "function") return Promise.resolve();
+    return cs.keys()
+      .then((keys) => Promise.all(keys.filter((k) => String(k).startsWith("jarvis-tts")).map((k) => cs.delete(k))))
+      .then(() => undefined, () => undefined);
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+/** @returns {Promise<void>} resolves when the last wipe("all") has also emptied the speech cache */
+export function wipeDone() {
+  return wiping;
+}
 
 /**
  * @param {"all"|"keys"|"facts"|"shortcuts"|"konto"|"history"|"log"|"timers"} scope
@@ -1277,11 +1449,12 @@ export function wipe(scope) {
   ensure();
   switch (scope) {
     case "all": {
+      wiping = clearSpeechCaches();
       for (const key of Object.values(KEYS)) removeKey(key);
       for (const key of Object.values(LEGACY_KEYS)) removeKey(key);
       state = {
         settings: DEFAULT_SETTINGS, facts: [], shortcuts: [], konto: null, timers: [],
-        history: { v: 1, updated: 0, messages: [] }, log: [], usage: { day: "", input: 0, output: 0, requests: 0 },
+        history: { v: 1, updated: 0, messages: [], webSeen: false }, log: [], usage: { day: "", input: 0, output: 0, requests: 0 },
         meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0 },
       };
       emit("settings", state.settings);

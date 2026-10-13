@@ -1,11 +1,12 @@
 // ==============================================================================================================
 // CONTRACT – voice.js (owner: builder AUDIO). Spec: ARCHITECTURE.md §3.2.6, §3.5.2.
 // No imports. Settings are injected via init({ settings }).
-// export const PRESETS        geraet (free device voice, default, CR1.2) · butler (de-DE-ConradNeural, -8 %, -6 Hz) · florian · killian · andrew
+// export const PRESETS        geraet (free device voice, default, CR1.2) · butler (de-DE-ConradNeural, +10 %, -6 Hz, live Mac config) · florian · killian · andrew
 // export function warmPhrases(anrede, closing): string[]
 // export function init({ settings })
 // export function on(event, fn): () => void   events: start, chunk, end, level, warn, blocked, engine
 // export function isUnlocked(); export async function tryAutoUnlock(); export function unlockInGesture()
+// export function primeInGesture()   silent utterance inside a trusted gesture (iOS speechSynthesis unlock), once per load
 // export function say(text); export function done(): Promise<void>; export function stop()
 // export function isSpeaking(); export function setMuted(on); export function isMuted()
 // export function usesAzure(); export function engineLabel(); export function resetAzure()
@@ -21,12 +22,13 @@
 // der erste klingt schon, während der Rest noch vertont wird. Web Audio + Analyser treibt die Kugel.
 // Unterbrechungen (Anruf, Siri, App-Wechsel) lassen Jarvis nie in SPRICHT hängen (Watchdogs).
 
-// Voreinstellungen (Mac voice/picker.html; Florian = ursprüngliche Mac-Einstellung +9 % / -5 Hz);
-// sys = Einstellung für die Gerätestimme (speechSynthesis).
+// Voreinstellungen (Mac voice/picker.html; Butler = live Mac voice/config.json: Conrad +10 % / -6 Hz; Florian =
+// ursprüngliche Mac-Einstellung +9 % / -5 Hz); sys = Einstellung für die Gerätestimme (speechSynthesis).
+// Tempo (voiceSpeed) gilt bei Azure wie am Mac absolut (edge_rate = voice_speed), 0 = Tempo der Voreinstellung.
 export const PRESETS = Object.freeze({
   // CHANGES-1 CR1.2: free device voice (speechSynthesis) is the default; never uses Azure.
   geraet: Object.freeze({ name: "Gerätestimme", voice: "", rate: 0, pitch: 0, free: true, sys: Object.freeze({ rate: 0.95, pitch: 0.85 }) }),
-  butler: Object.freeze({ name: "Butler", voice: "de-DE-ConradNeural", rate: -8, pitch: -6, sys: Object.freeze({ rate: 0.9, pitch: 0.78 }) }),
+  butler: Object.freeze({ name: "Butler", voice: "de-DE-ConradNeural", rate: 10, pitch: -6, sys: Object.freeze({ rate: 0.9, pitch: 0.78 }) }),
   florian: Object.freeze({ name: "Florian", voice: "de-DE-FlorianMultilingualNeural", rate: 9, pitch: -5, sys: Object.freeze({ rate: 1.0, pitch: 0.9 }) }),
   killian: Object.freeze({ name: "Killian", voice: "de-DE-KillianNeural", rate: -5, pitch: -4, sys: Object.freeze({ rate: 0.95, pitch: 0.85 }) }),
   andrew: Object.freeze({ name: "Andrew", voice: "en-US-AndrewMultilingualNeural", rate: -6, pitch: -3, sys: Object.freeze({ rate: 0.95, pitch: 0.88 }) }),
@@ -78,6 +80,7 @@ let lastLabel = "";
 
 let sysVoice = null;
 let lastCancelAt = 0;
+let synthPrimed = false;     // speechSynthesis in a trusted gesture spoken once this page load (iOS unlock)
 const keep = new Set();      // strong references: Safari drops utterances (and their onend) otherwise
 
 // ---------------------------------------------------------------------------------------------- helpers
@@ -126,7 +129,7 @@ function voiceCfg(draft = null) {
   if (!Number.isFinite(speed)) speed = 0;
   speed = clamp(Math.round(speed), SPEED_RANGE[0], SPEED_RANGE[1]);
   return {
-    preset, voice: preset.voice, rate: preset.rate + speed, pitch: preset.pitch, speed,
+    preset, voice: preset.voice, rate: speed !== 0 ? speed : preset.rate, pitch: preset.pitch, speed,
     key: String(s.azureKey || "").trim(), region: cleanRegion(s.azureRegion),
     sysRate: clamp(preset.sys.rate * (1 + speed / 100), 0.5, 2), sysPitch: preset.sys.pitch,
     draft: !!draft,
@@ -247,7 +250,9 @@ function afterUnlock() {
 
 function primeSynth() {
   const sy = synthApi();
-  if (!sy || (current && current.kind === "system")) return;
+  if (!sy) return;
+  if (current && current.kind === "system") { synthPrimed = true; return; }   // spricht schon: ist frei
+  synthPrimed = true;
   try {
     const u = new window.SpeechSynthesisUtterance(" ");
     u.volume = 0;
@@ -261,7 +266,10 @@ function primeSynth() {
   } catch { /* ignore */ }
 }
 
-function onAnyTap() {
+function onAnyTap(e) {
+  // iOS: speechSynthesis spricht erst, wenn einmal in einer echten Berührung gesprochen wurde – bei jedem Seitenaufruf
+  // (auch ohne Start-Fänger, z. B. ohne Begrüßung oder im Hintergrund-Start). Ein stummer Satz reicht.
+  if (!synthPrimed && (!e || e.isTrusted !== false)) primeSynth();
   // Passive help: any later tap resumes a suspended context (e.g. after a call); queued speech then plays.
   if (!ctx || ctx.state === "running" || ctx.state === "closed") return;
   try {
@@ -295,6 +303,7 @@ export function init(d = {}) {
   if (typeof document !== "undefined" && document.addEventListener) {
     document.addEventListener("touchend", onAnyTap, { capture: true, passive: true });
     document.addEventListener("click", onAnyTap, { capture: true, passive: true });
+    document.addEventListener("keydown", onAnyTap, { capture: true, passive: true });
   }
   lastLabel = engineLabel();
 }
@@ -309,6 +318,11 @@ export function on(event, fn) {
 export function audioContext() { return ctx; }
 
 export function isUnlocked() { return isRunning(); }
+
+/** Synchronously inside a trusted tap/click/key: prime speechSynthesis once per page load (iOS, ios-3). */
+export function primeInGesture() {
+  if (!synthPrimed) primeSynth();
+}
 
 export async function tryAutoUnlock() {
   const ok = await resumeQuick(AUTO_UNLOCK_MS);
@@ -460,7 +474,7 @@ export function clean(text) {
   t = t.split(/\r?\n/).map((line) => {
     let s = line.trim();
     if (/^AKTION:/i.test(s)) return "";
-    s = s.replace(/\s*AKTION:\s*\{.*$/, "");                        // mid-line action payload is never read aloud
+    s = s.replace(/\s*AKTION:\s*\{.*$/i, "");                        // mid-line action payload is never read aloud
     if (s.startsWith("|") && /^[\s|:-]+$/.test(s)) return "";
     if (s.startsWith("|")) s = s.replace(/^\|+|\|+$/g, "").split("|").map((c) => c.trim()).filter(Boolean).join(", ");
     return s.replace(/^#{1,6}\s*/, "").replace(/^([-*+]|\d+\.)\s+/, "").replace(/^>\s?/, "");

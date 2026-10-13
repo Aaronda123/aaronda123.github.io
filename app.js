@@ -12,7 +12,7 @@
 // (SAFE_AFTER_WEB and learn guard, D15/D18) → closing phrase (§4.6), else the free noBrain line with a ⚙ button (CR1.3);
 // action results drive links, images, 3D models and the orb (applyResult); hidden / stealth modes close the model
 // (§4.8); timers incl. the Mac 30-minute missed-timer rule, idle dim, auto-hide, visibility (§4.9); commands (§4.10);
-// desktop keys Ctrl+Alt+Space / J / K and Escape (CR3).
+// desktop keys Ctrl+Alt+Space / J / K and Escape (CR3); Android/browser Back closes sheets and the 3D model (history).
 // Test hook (always on, contains no secrets):
 //   window.__jarvis = { get state, get mode, get muted, get wake, get locked, spoken: [], heard: [],
 //                       handle(text, { spoken }), listen(), stop(), stealth(), show(), version: "2.0.0" }
@@ -34,6 +34,7 @@ const FOLLOW_UP_DELAY_MS = 350;            // Mac speak_done: 0,35 s Nachhall, d
 const BOOT_READY_MS = 900;
 const BOOT_HIDE_MS = 600;
 const TIMER_LATE_MS = 30000;               // bis 30 s zu spät: ganz normal ansagen
+const TIMER_ALIVE_GAP_MS = 75000;          // Hintergrund-Tab (Chrome: 1 Weckruf pro Minute): Seite lief, kein „verpasst“
 const TIMER_MISSED_MS = 30 * 60000;        // live Mac Timers.restore: bis 30 min nachträglich melden
 const ANNOUNCE_POLL_MS = 500;
 const ANNOUNCE_MAX_MS = 60000;
@@ -46,14 +47,31 @@ const GEMINI_KEY_RX = /^[A-Za-z0-9_-]{30,}$/;
 const GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"];
 const TIMING_KEYS = ["silenceSeconds", "hesitationSeconds", "maxRecordSeconds", "noSpeechSeconds", "followUpSeconds"];
 const SAY_TYPES = new Set(["weather", "show_image", "next_image"]);
-const WAKE_LABEL = { on: "AKTIV", starting: "AKTIV", off: "AUS", paused: "PAUSE", blocked: "GESPERRT",
+// „starting“ ist noch nicht „AKTIV“ (Browser ohne Erkennungsdienst blieben sonst ewig scheinbar aktiv, android-desktop-8)
+const WAKE_LABEL = { on: "AKTIV", starting: "STARTET", off: "AUS", paused: "PAUSE", blocked: "GESPERRT",
   unsupported: "NICHT VERFÜGBAR", error: "PAUSE" };
 const WAKE_RUNNING = new Set(["on", "starting", "paused"]);
-
-// ?wake=1 vor importFromLocation lesen (das räumt die Adresse auf)
-const WAKE_PARAM = (() => {
-  try { return new URLSearchParams(location.search).has("wake"); } catch { return false; }
+const UNLOCK_KEYS_IGNORED = new Set(["Escape", "Shift", "Control", "Alt", "Meta", "CapsLock", "Tab"]);
+const OUTSIDE_WAKE_DEDUPE_MS = 1500;
+// Maus statt Finger (Rechner): Hinweise sagen „anklicken“/„Doppelklick“ statt „antippen“/„zweimal tippen“ (visual-ux-13)
+const MOUSE = (() => {
+  try {
+    return !!window.matchMedia?.("(hover: hover) and (pointer: fine)").matches
+      && !window.matchMedia?.("(any-pointer: coarse)").matches;
+  } catch { return false; }
 })();
+const TAP2 = MOUSE ? "Doppelklick" : "zweimal tippen";
+const TYPE_DETAIL = MOUSE ? "Tipp deine Frage ein …" : "Tippen oder diktieren …";
+
+// Setup-Link (#cfg=) und ?wake=1 gleich beim Laden lesen und aus der Adresse nehmen – vor allem anderen, damit der
+// Link nicht in der Adresszeile, beim Teilen oder in wiederhergestellten Tabs stehen bleibt (security-privacy-3)
+const BOOT_IMPORT = (() => {
+  try { return store.importFromLocation() || { imported: false, wake: false, pending: null }; } catch (e) {
+    console.error("setup link", e);
+    return { imported: false, wake: false, pending: null, error: "cfg" };
+  }
+})();
+const WAKE_PARAM = !!BOOT_IMPORT.wake;
 
 // ---------------------------------------------------------------- Zustand (§4.1)
 let state = "loading";
@@ -84,6 +102,21 @@ let lastSettings = null;
 let gestureNow = false;                   // gerade synchron in einem Tippen (Mikrofon darf starten)
 let announceChain = Promise.resolve();
 let authBad = false;
+let awakeCatcher = false;                 // Fänger nur fürs Wachhalten (Hintergrund-Start, ?wake=1), einmal pro Aufruf
+let awakeCatcherShown = false;
+let heardPartial = false;                 // im offenen Zuhören schon etwas verstanden (für das Tippen nach ?wake=1)
+let lastTickAt = 0;
+const PAGE_START = Date.now();            // diese Seite läuft seit … (Timer, die danach abliefen, liefen bei offener Seite ab)
+let timerWake = 0;
+let historyPushed = false;                // eigener Verlaufseintrag für ein offenes Blatt / 3D-Modell (Zurück-Taste)
+let ignorePops = 0;
+let serviceLogged = false;
+let micUnlock = null;                     // Freischalt-Versuch des Mikrofons aus dem laufenden Tippen (robustness-1)
+let wakeGen = 0;                          // ++ bei jedem Ein-/Ausschalten des Weckworts (robustness-2)
+let imagePausedBy = null;                 // die Zuhör-Runde, die die Bild-Zeit angehalten hat (robustness-3)
+let mutedTurn = 0;                        // Runde, die beim Wechsel in den Hintergrund lief: spricht nicht weiter (robustness-9)
+let lastOutsideWake = 0;                  // Rückkehr + pageshow: nur ein „Ja, Boss?“ (robustness-12)
+let importPending = null;                 // Setup-Link, der erst nach Bestätigung gilt (security-privacy-1)
 
 const S = () => store.settings();
 const A = () => store.anrede();
@@ -107,6 +140,14 @@ function isStandalone() {
 function isIOS() {
   return /iPhone|iPad|iPod/.test(navigator.userAgent || "")
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** Wie Jarvis das Gerät nennt (Sätze und Gehirn, CR3.1): iPhone, iPad, Handy oder Computer. */
+function deviceNoun() {
+  const ua = navigator.userAgent || "";
+  if (isIOS()) return /iPhone|iPod/.test(ua) ? "iPhone" : "iPad";
+  if (/Android/i.test(ua)) return /Mobile/i.test(ua) ? "Handy" : "Tablet";
+  return "Computer";
 }
 
 // ---------------------------------------------------------------- Test-Hook (§11.2)
@@ -191,6 +232,8 @@ function errorKey(e, prov = provider()) {
   if (prov === "gemini") {
     if (code === "auth") return "err.gemini.auth";
     if (code === "rate" || code === "credit") return "err.gemini.rate";
+    // erst wenn alle Gemini-Modelle überlastet / nicht erreichbar waren (api-3)
+    if (code === "server" || code === "network" || code === "timeout") return `err.gemini.${code}`;
     return "err.other";
   }
   return intents.LINES[`err.${code}`] ? `err.${code}` : "err.other";
@@ -297,9 +340,9 @@ function wakeLabel(ws) {
 function veilHint() {
   const s = S();
   const ws = safe(() => ears.wakeState(), "off");
-  if (!s.wakeWord || !WAKE_RUNNING.has(ws)) return L("veilNoMic");
-  if (mode === "stealth") return L("veilStealth");
-  return L(muted ? "veilMuted" : "veilHidden");
+  if (!s.wakeWord || !WAKE_RUNNING.has(ws)) return L("veilNoMic", { T: TAP2 });
+  if (mode === "stealth") return L("veilStealth", { T: TAP2 });
+  return L(muted ? "veilMuted" : "veilHidden", { T: TAP2 });
 }
 
 // ---------------------------------------------------------------- Zustand setzen
@@ -317,9 +360,18 @@ function activity() {
   }
 }
 
-function applyKeepAwake() {
+// Wach halten nur, solange das Weckwort wirklich lauschen kann (nicht in Firefox, nicht bei gesperrtem Mikrofon)
+function keepAwakeWanted() {
   const s = S();
-  awake.keepAwake(!!(s.keepAwake && s.wakeWord)).catch((e) => report("awake", e));
+  return !!(s.keepAwake && s.wakeWord) && WAKE_RUNNING.has(safe(() => ears.wakeState(), "off"));
+}
+
+function applyKeepAwake() {
+  return awake.keepAwake(keepAwakeWanted()).catch((e) => { report("awake", e); return "none"; });
+}
+
+function wakeAvailable() {
+  return !!S().wakeWord && WAKE_RUNNING.has(safe(() => ears.wakeState(), "off"));
 }
 
 function timingsFrom(s) {
@@ -335,7 +387,7 @@ function timingsFrom(s) {
 async function speak(text, my) {
   safe(() => ears.pauseWake(), null);
   const t0 = String(text ?? "").trim();
-  if (muted || !t0) return;
+  if (muted || !t0 || (my && my === mutedTurn)) return;
   const s = S();
   const t = intents.voiceText(t0, { maxSentences: s.speakMaxSentences, maxChars: s.speakMaxChars,
     closing: store.closingPhrase() });
@@ -349,7 +401,7 @@ async function speak(text, my) {
 
 /** Ein Satz aus dem Gehirn-Stream (Feeder hat das Sprech-Budget schon angewendet). */
 function speakChunk(text, my) {
-  if (my !== turn || muted) return;
+  if (my !== turn || muted || my === mutedTurn) return;
   const t = String(text ?? "").trim();
   if (!t) return;
   expectSpeech = my;
@@ -360,8 +412,13 @@ function speakChunk(text, my) {
 function finishTurn(my, fu = false) {
   if (my !== turn) return;
   expectSpeech = 0;
-  if (fu && !muted) {
-    setTimeout(() => { if (my === turn) listen({ followUp: true }); }, FOLLOW_UP_DELAY_MS);
+  // im Hintergrund kein Nachhören: kein Mikrofon und kein Ton in einer Seite, die man nicht sieht (robustness-9)
+  if (fu && !muted && my !== mutedTurn && document.visibilityState !== "hidden") {
+    setTimeout(() => {
+      if (my !== turn) return;
+      if (document.visibilityState === "hidden") { setState("idle", "Bereit."); resumeIdle(); return; }
+      listen({ followUp: true });
+    }, FOLLOW_UP_DELAY_MS);
     return;
   }
   setState("idle", "Bereit.");
@@ -404,7 +461,9 @@ function stopAll() {
 }
 
 function resumeIdle() {
-  if (S().wakeWord && state === "idle" && !sheets.isOpen() && !inputFocused) safe(() => ears.resumeWake(), null);
+  if (S().wakeWord && state === "idle" && !sheets.isOpen() && !inputFocused && !safe(() => voice.isSpeaking(), false)) {
+    safe(() => ears.resumeWake(), null);
+  }
 }
 
 // ---------------------------------------------------------------- Modi (§4.8)
@@ -421,6 +480,7 @@ function enterHidden({ fast = false, muted: m = false } = {}) {
   hud.hideImage();
   hud.hideModel();
   applyKeepAwake();
+  syncHistory();
 }
 
 function enterStealth({ silent = false } = {}) {
@@ -437,6 +497,7 @@ function enterStealth({ silent = false } = {}) {
   if (!silent) log("system", L("stealthLog"));
   applyKeepAwake();
   resumeIdle();
+  syncHistory();
 }
 
 function leaveHidden({ pop = true } = {}) {
@@ -467,7 +528,7 @@ function applyResult(r) {
     hud.showLink(r.link);
     if (!linkToastShown) {
       linkToastShown = true;
-      hud.toast("Zum Öffnen antippen.");
+      hud.toast(MOUSE ? "Zum Öffnen anklicken." : "Zum Öffnen antippen.");
     }
   }
   if (r.image) {
@@ -491,6 +552,7 @@ function applyResult(r) {
   else if (r.ui === "hide") enterHidden({ muted: false });
   else if (r.ui === "show") leaveHidden({ pop: true });
   else if (r.ui === "hide_image") hud.hideImage();
+  syncHistory();
 }
 
 async function run(action, c) {
@@ -517,6 +579,10 @@ async function handleText(text, { spoken = false, prehidden: ph = false } = {}) 
   const my = ++turn;
   interrupt(false);
   activity();
+  // ?wake=1 mit gesperrtem Ton: es kam ein Befehl → nach dem Tippen nur seine Antwort, kein „Ja, Boss?“ (robustness-4)
+  if (pendingAfterUnlock === "wake") pendingAfterUnlock = "answer";
+  // gesprochen: Mikrofon ist zu, Jarvis versteht (Mac „Verstehe …“); Antippen der Kugel = Stopp (robustness-8)
+  if (spoken && (state === "listening" || state === "idle")) setState("transcribing", "Verstehe …");
   heardAt = heardAt && Date.now() - heardAt < 5000 ? heardAt : Date.now();
   hook.heard.push(text);
   log("user", text);
@@ -562,6 +628,7 @@ async function quickPath(q, text, my, ph) {
   let answer = q.special === "repeat" ? (lastAnswer || L("repeatNothing")) : String(q.say || "");
   if (actions.length && !answer.trimEnd().endsWith("?")) answer = intents.confirmText(actions, answer, anrede);
   const results = [];
+  if (actions.length) setState("thinking", "Einen Moment …");   // Wetter/Bild holen: nicht „BEREIT“, kein Timer dazwischen
   for (const a of actions) {
     const r = await run(a, ctx(false, text));
     if (my !== turn) return;
@@ -609,6 +676,10 @@ async function brainTurn(text, my, spoken) {
         if (state === "thinking") hud.setDetail("Suche im Web …");
       },
       onFirstText: () => { if (my === turn && state === "thinking") hud.setDetail("Formuliere …"); },
+      onProgress: (note) => {                                 // Zwischenstand während der Websuche (api-4)
+        if (my !== turn || state !== "thinking" || !note) return;
+        hud.setDetail(note.length > 90 ? `${note.slice(0, 89)}…` : note);
+      },
       onChunk: (c) => speakChunk(c, my),
       onLog: (kind, t) => log(kind || "system", t),
     });
@@ -680,7 +751,7 @@ async function brainTurn(text, my, spoken) {
   if (tail) {
     log("jarvis", tail);
     if (!res.spokenText) lastAnswer = tail;
-    if (!muted) {
+    if (!muted && my !== mutedTurn) {
       const s = S();
       const t = intents.voiceText(tail, { maxSentences: s.speakMaxSentences, maxChars: s.speakMaxChars, closing });
       expectSpeech = my;
@@ -723,6 +794,18 @@ function listen({ followUp: fu = false, fromTap = false } = {}) {
   activity();
   if (mode !== "shown") leaveHidden({ pop: true });
   if (safe(() => ears.engine(), "keyboard") === "keyboard") {
+    // Mikrofon gesperrt, aber dieses Tippen versucht es gerade neu (Erlaubnis inzwischen erteilt?): abwarten und dann
+    // zuhören statt sofort die Tastatur – sonst bleibt das Weckwort für immer GESPERRT (robustness-1)
+    const p = micUnlock;
+    if (p && safe(() => ears.blockReason(), null)) {
+      setState("idle", "Mikrofon …");
+      p.then((ok) => {
+        if (my !== turn) return;
+        if (ok && safe(() => ears.engine(), "keyboard") !== "keyboard") listen({ followUp: fu });
+        else keyboardFallback(false);
+      }, () => { if (my === turn) keyboardFallback(false); });
+      return;
+    }
     keyboardFallback(fromTap);
     return;
   }
@@ -741,17 +824,24 @@ function listen({ followUp: fu = false, fromTap = false } = {}) {
 async function runListening(l, { followUp: fu = false } = {}, my = turn) {
   listening = l;
   prehidden = false;
+  heardPartial = false;
   setState("listening", fu ? L("followUpDetail") : "Ich höre zu …", { soft: fu });
   hud.pauseImage(true);
+  imagePausedBy = l;
   let res;
   try {
     res = await l.promise;
   } catch (e) {
     res = { text: "", reason: "error", prehidden: false, error: { code: "unavailable", message: String(e?.message || e) } };
   }
+  // die Bild-Zeit läuft weiter, auch wenn diese Runde überholt wurde (getippter Befehl, Stopp) – sonst bleibt das
+  // Bild für immer stehen und verdeckt die Kugel (robustness-3)
+  if (imagePausedBy === l) {
+    imagePausedBy = null;
+    hud.pauseImage(false);
+  }
   if (my !== turn) return;
   if (listening === l) listening = null;
-  hud.pauseImage(false);
   hud.setLive(null);
   res = res || { text: "", reason: "cancelled" };
   const ph = !!(res.prehidden || prehidden);
@@ -798,24 +888,24 @@ async function sayPresence({ followUp: fu = false } = {}) {
 function orbTap() {
   activity();
   if (!booted) return;
-  if (listening) {
-    listening.finish();                                       // D6: Antippen = „fertig“
+  if (state === "transcribing" || state === "thinking" || state === "speaking") {
+    stopAll();                                                // auch während VERSTEHE (Azure lädt hoch, robustness-11)
     return;
   }
-  if (state === "thinking" || state === "speaking" || state === "transcribing") {
-    stopAll();
+  if (listening) {
+    listening.finish();                                       // D6: Antippen = „fertig“
     return;
   }
   listen({ fromTap: true });
 }
 
 function keyboardFallback(fromTap) {
-  setState("idle", "Tippen oder diktieren …");
+  setState("idle", TYPE_DETAIL);
   if (fromTap) {
     hud.focusInput();                                         // synchron im Tippen (bug 3)
   } else {
-    hud.toast("Tipp unten ins Feld und nutze das Mikrofon der Tastatur zum Diktieren.", 4000);
-    hud.setLive("Tippen oder diktieren …");
+    hud.toast(MOUSE ? "Tipp deine Frage unten ins Feld." : "Tipp unten ins Feld und nutze das Mikrofon der Tastatur zum Diktieren.", 4000);
+    hud.setLive(TYPE_DETAIL);
   }
   showNoListenHint();
 }
@@ -829,13 +919,27 @@ function showNoListenHint() {
   hud.toast(L("noListen"), 5000);
 }
 
+// Siri/Diktierfunktion aus oder Sprachdienst gerade weg (service-not-allowed) – nicht das Mikrofon (WebKit trennt das)
+function logServiceOff() {
+  if (serviceLogged) return;
+  serviceLogged = true;
+  log("system", L(isIOS() ? "speechOff" : "speechOffWeb"));
+}
+
+function logMicDenied() {
+  if (safe(() => ears.blockReason(), null) === "service") { logServiceOff(); return; }
+  if (micDeniedLogged) return;
+  micDeniedLogged = true;
+  log("system", L(isStandalone() && isIOS() ? "micDenied" : "micDeniedWeb"));
+}
+
 function earError(err) {
   const code = err?.code;
   if (code === "denied") {
-    if (!micDeniedLogged) {
-      micDeniedLogged = true;
-      log("system", L(isStandalone() && isIOS() ? "micDenied" : "micDeniedWeb"));
-    }
+    logMicDenied();
+    hud.setTelemetry({ wake: "GESPERRT" });
+  } else if (code === "service") {
+    logServiceOff();
     hud.setTelemetry({ wake: "GESPERRT" });
   } else if (code === "network") {
     log("system", "Die Spracherkennung braucht Internet.");
@@ -871,6 +975,7 @@ const earHandlers = {
   onPartial(text) {
     if (!listening) return;
     const t = String(text ?? "").trim();
+    if (t) heardPartial = true;
     hud.setLive(t ? `„${t}“` : null);
     activity();
   },
@@ -880,16 +985,22 @@ const earHandlers = {
   onPrehide() {
     if (!listening || mode !== "shown") return;
     prehidden = true;                                         // Mac prehide: sofort weg, Satz läuft weiter
-    hud.setVisibility("hidden", { fast: true, hint: L("veilHidden") });
+    hud.setVisibility("hidden", { fast: true, hint: L("veilHidden", { T: TAP2 }) });
   },
   onPhase(phase) {
     if (phase === "transcribing" && listening) setState("transcribing", "Verstehe …");
   },
   onWakeState(ws) {
     hud.setTelemetry({ wake: wakeLabel(ws) });
-    if (ws === "blocked") markMicBlocked();
+    if (ws === "blocked") {
+      if (safe(() => ears.blockReason(), null) === "service") logServiceOff();
+      markMicBlocked();
+    }
+    if (ws === "unsupported" && booted) showNoListenHint();
+    hud.setWakeHint(wakeAvailable());
     if (mode !== "shown" && state === "idle") hud.setVisibility(mode, { fast: true, hint: veilHint() });
     safe(() => sheets.refresh(), null);
+    if (booted) applyKeepAwake();                             // nur wach halten, solange wirklich gelauscht wird
   },
   onEngine(name) {
     hud.setTelemetry({ mic: micLabel(name) });
@@ -907,15 +1018,20 @@ function markMicBlocked() {
 }
 
 function startWake(gesture) {
+  const gen = ++wakeGen;
+  // inzwischen wieder ausgeschaltet (zweimal schnell getippt): nichts mehr starten – der Knopf sagt „aus“ (robustness-2)
+  const stale = () => gen !== wakeGen || !S().wakeWord;
   const after = (ws) => {
+    if (stale()) return;
     if (ws === "blocked") markMicBlocked();
-    if (state !== "idle" || sheets.isOpen() || inputFocused) safe(() => ears.pauseWake(), null);
+    if (state !== "idle" || sheets.isOpen() || inputFocused || safe(() => voice.isSpeaking(), false)) safe(() => ears.pauseWake(), null);
     if (mode !== "shown" && state === "idle") hud.setVisibility(mode, { fast: true, hint: veilHint() });
   };
   if (gesture && safe(() => ears.capabilities().native, false)) {
     ears.unlockInGesture()
       .then((ok) => {
         if (ok) locked.mic = false;
+        if (stale()) return safe(() => ears.wakeState(), "off");
         return ears.startWake();
       })
       .then(after, (e) => report("wake", e));
@@ -925,11 +1041,18 @@ function startWake(gesture) {
 }
 
 // ---------------------------------------------------------------- Freischalten (§4.3)
+// Jede echte Berührung (Tippen, Klick, Taste) schaltet frei; Tasten zählen auch (Rechner, CR3).
+function onUnlockKey(e) {
+  if (!e.isTrusted || UNLOCK_KEYS_IGNORED.has(e.key) || e.ctrlKey || e.metaKey) return;
+  onUnlockGesture(e);
+}
+
 function installUnlockListeners() {
   if (unlockInstalled) return;
   unlockInstalled = true;
   document.addEventListener("touchend", onUnlockGesture, true);
   document.addEventListener("click", onUnlockGesture, true);
+  document.addEventListener("keydown", onUnlockKey, true);
 }
 
 function removeUnlockListeners() {
@@ -937,16 +1060,45 @@ function removeUnlockListeners() {
   unlockInstalled = false;
   document.removeEventListener("touchend", onUnlockGesture, true);
   document.removeEventListener("click", onUnlockGesture, true);
+  document.removeEventListener("keydown", onUnlockKey, true);
 }
 
 function showUnlockCatcher(answer = false) {
+  awakeCatcher = false;
   hud.showUnlock(L(answer ? "unlockAnswer" : "unlockStart"));
   installUnlockListeners();
 }
 
+// Hintergrund-Start und ?wake=1 ohne Wake Lock: Safari erteilt die Sperre nur in einer Berührung – einmal fragen,
+// sonst sperrt sich das iPhone nach der Auto-Sperre und Jarvis hört nichts mehr (§4.3, ios-1).
+function maybeAwakeCatcher() {
+  if (awakeCatcherShown || !booted || !safe(() => awake.needsGesture(), false)) return;
+  if (safe(() => hud.isUnlockShown(), false)) return;          // der normale Fänger tut es mit
+  awakeCatcherShown = true;
+  awakeCatcher = true;
+  hud.showUnlock(L("unlockAwake"));
+  installUnlockListeners();
+}
+
+// Erste Berührung jedes Seitenaufrufs (alle Wege): Wake Lock mit Nutzeraktivierung (iOS), Gerätestimme freischalten.
+// Die Sperre wird auch geholt, wenn das Weckwort erst durch dieses Tippen anläuft (Mikrofon-Freigabe); ob sie bleibt,
+// entscheidet danach applyKeepAwake().
+function gestureBasics() {
+  const s = S();
+  const intent = keepAwakeWanted() || (!!(s.keepAwake && s.wakeWord) && locked.mic);
+  safe(() => awake.inGesture(intent), null);
+  safe(() => voice.primeInGesture(), null);
+}
+
 function onUnlockGesture() {
+  gestureBasics();                                            // synchron in der Berührung
   if (!locked.audio && !locked.mic) {
+    if (awakeCatcher) {
+      awakeCatcher = false;
+      hud.showUnlock(null);
+    }
     removeUnlockListeners();
+    if (booted) applyKeepAwake();
     return;
   }
   if (unlocking) return;
@@ -954,23 +1106,39 @@ function onUnlockGesture() {
   // synchroner Teil im Tippen: Ton und Spracherkennung freischalten
   const a = locked.audio || !voice.isUnlocked() ? voice.unlockInGesture() : Promise.resolve(true);
   const native = safe(() => ears.capabilities().native, false);
-  const m = native && (locked.mic || S().wakeWord) ? ears.unlockInGesture() : Promise.resolve(true);
-  Promise.all([a.catch(() => false), m.catch(() => false)]).then(async ([audioOk, micOk]) => {
-    locked = { audio: !audioOk, mic: false };
-    if (!micOk) {                                             // Mikrofon verweigert: Jarvis bleibt per Tippen nutzbar
-      if (!micDeniedLogged) {
-        micDeniedLogged = true;
-        log("system", L(isStandalone() && isIOS() ? "micDenied" : "micDeniedWeb"));
-      }
+  // dauerhaft verweigert (Berechtigung „denied“): nicht bei jedem Tippen neu fragen
+  const tryMic = native && (locked.mic || S().wakeWord) && safe(() => ears.micPermission(), null) !== "denied";
+  const m = tryMic ? ears.unlockInGesture() : Promise.resolve(!locked.mic);
+  micUnlock = m.catch(() => false);
+  Promise.all([a.catch(() => false), micUnlock]).then(async ([audioOk, micOk]) => {
+    // Mikrofon weiter gesperrt: das nächste Tippen versucht es wieder (Erlaubnis später erteilt, robustness-1)
+    const stillBlocked = !micOk && !!safe(() => ears.blockReason(), null);
+    locked = { audio: !audioOk, mic: stillBlocked };
+    if (!micOk && (stillBlocked || tryMic)) {                 // Mikrofon verweigert: Jarvis bleibt per Tippen nutzbar
+      logMicDenied();
       hud.setTelemetry({ wake: "GESPERRT" });
     }
     if (!locked.audio) {
+      awakeCatcher = false;
       hud.showUnlock(null);
-      removeUnlockListeners();
+      if (!locked.mic) removeUnlockListeners();
     }
-    if (micOk && S().wakeWord) {
+    // Ton war gesperrt und voice spielt jetzt die wartende Antwort ab: das ist „SPRICHT“, kein offenes Mikrofon (D5,
+    // robustness-5); danach zurück in BEREIT mit Weckwort
+    const replaying = !locked.audio && !expectSpeech && state !== "speaking" && safe(() => voice.isSpeaking(), false);
+    if (replaying) {
+      const my = turn;
+      safe(() => ears.pauseWake(), null);
+      setState("speaking", "Spreche …");
+      voice.done().then(() => {
+        if (my !== turn || state !== "speaking") return;
+        setState("idle", "Bereit.");
+        resumeIdle();
+      });
+    }
+    if (micOk && S().wakeWord && !replaying) {
       try { await ears.startWake(); } catch (e) { report("wake", e); }
-      if (state !== "idle" || sheets.isOpen() || inputFocused) safe(() => ears.pauseWake(), null);
+      if (state !== "idle" || sheets.isOpen() || inputFocused || safe(() => voice.isSpeaking(), false)) safe(() => ears.pauseWake(), null);
     }
     const pending = pendingAfterUnlock;
     if (locked.audio) return;
@@ -979,14 +1147,30 @@ function onUnlockGesture() {
     else if (pending === "background") continueBoot("background");
     else if (pending === "wake") {
       if (!booted) continueBoot("wake");
-      else if (!listening && (state === "idle" || state === "error" || state === "loading")) wakeFromOutside();
+      else if (listening && !heardPartial) {
+        // ?wake=1: das stille Zuhören vor dem Tippen hat nichts gehört → jetzt hörbar: Ton, „Ja, Boss?“, nachhören
+        const l = listening;
+        listening = null;
+        safe(() => l.cancel(), null);
+        hud.setLive(null);
+        wakeFromOutside({ force: true });
+      } else if (!listening && (state === "idle" || state === "error" || state === "loading")) wakeFromOutside({ force: true });
+      // sonst läuft schon ein Befehl: seine Antwort spielt voice nach dem Freischalten selbst ab
     }
     // "answer": voice spielt die wartenden Sätze nach dem Freischalten selbst ab
-  }).catch((e) => report("unlock", e)).finally(() => { unlocking = false; });
+  }).catch((e) => report("unlock", e)).finally(() => {
+    unlocking = false;
+    micUnlock = null;
+    if (booted) applyKeepAwake();                             // Sperre aus dem Tippen nur behalten, wenn gelauscht wird
+  });
 }
 
 // ---------------------------------------------------------------- Wecken von außen (§4.4.3)
-function wakeFromOutside() {
+function wakeFromOutside({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - lastOutsideWake < OUTSIDE_WAKE_DEDUPE_MS) return;   // visibilitychange + pageshow: einmal
+  lastOutsideWake = now;
+  interrupt();                                                // kein zweites „Ja, Boss?“ hinter dem ersten
   turn++;
   muted = false;
   voice.setMuted(false);
@@ -994,10 +1178,8 @@ function wakeFromOutside() {
   else hud.setVisibility("shown", { pop: true });
   if (locked.audio || locked.mic) {
     showUnlockCatcher(false);
-    if (!locked.mic) {
-      pendingAfterUnlock = "answer";                          // schon zuhören, die Antwort kommt nach dem Tippen
-      listen();
-    } else pendingAfterUnlock = "wake";
+    pendingAfterUnlock = "wake";                              // §4.4.3: nach dem Tippen „Ja, Boss?“ (oder die Antwort)
+    if (!locked.mic) listen();                                // schon zuhören: wer gleich spricht, bekommt die Antwort
     return;
   }
   voice.chime("wake");
@@ -1005,15 +1187,31 @@ function wakeFromOutside() {
 }
 
 // ---------------------------------------------------------------- Timer (§4.9)
-function handleDue(due, now) {
+// „während ich geschlossen war“ nur, wenn die Seite wirklich zu oder eingefroren war: lief sie (auch als gedrosselter
+// Hintergrund-Tab mit einem Weckruf pro Minute), ist der Timer einfach abgelaufen.
+function handleDue(due, now, alive = false) {
   const missed = [];
   for (const t of due) {
     const late = now - Number(t.ends);
-    if (late <= TIMER_LATE_MS) announce(L("timerDone", { label: t.label }));
+    const ranOut = alive && Number(t.ends) >= PAGE_START;     // abgelaufen, während diese Seite schon lief
+    if (late <= TIMER_LATE_MS || (ranOut && late <= TIMER_ALIVE_GAP_MS)) announce(L("timerDone", { label: t.label }));
     else if (late <= TIMER_MISSED_MS) missed.push(t);
     // länger her: still verwerfen (live Mac Timers.restore)
   }
   if (missed.length) announce(L("timerMissed", { label: missed[0].label }));
+}
+
+// Eigener Weckruf genau zum Ablauf des nächsten Timers: ein frischer setTimeout wird im Hintergrund-Tab nicht wie
+// der Sekundentakt auf eine Minute gedrosselt (Chrome „intensive throttling“).
+function scheduleTimerWake() {
+  clearTimeout(timerWake);
+  timerWake = 0;
+  let list = [];
+  try { list = store.timers(); } catch { list = []; }
+  const next = list.reduce((m, t) => Math.min(m, Number(t.ends) || Infinity), Infinity);
+  if (!Number.isFinite(next)) return;
+  const ms = Math.max(0, Math.min(next - Date.now() + 30, 2 ** 31 - 1));
+  timerWake = setTimeout(() => { timerWake = 0; tick(); scheduleTimerWake(); }, ms);
 }
 
 function announce(text) {
@@ -1040,10 +1238,14 @@ async function doAnnounce(text) {
 
 function tick() {
   const now = Date.now();
+  // lief die Seite seit dem letzten Takt durch (höchstens gedrosselt)? Vor dem ersten Takt zählt der Seitenstart.
+  const alive = now - (lastTickAt || PAGE_START) <= TIMER_ALIVE_GAP_MS;
+  lastTickAt = now;
   let due = [];
   try { due = store.takeDue(now); } catch (e) { report("timers", e); }
   safe(() => hud.renderTimers(store.timers(), now), null);
-  if (due.length) handleDue(due, now);
+  if (due.length) handleDue(due, now, alive);
+  syncHistory();
   const s = S();
   if (state === "idle" && !voice.isSpeaking() && !listening) {
     const quiet = now - lastActivity;
@@ -1076,7 +1278,10 @@ function applySettings(next) {
     hud.setWakeButton(!!next.wakeWord);
     if (booted) {
       if (next.wakeWord) startWake(gestureNow);
-      else safe(() => ears.stopWake(), null);
+      else {
+        wakeGen++;                                            // ein noch laufender Start (Freischalten) startet nichts mehr
+        safe(() => ears.stopWake(), null);
+      }
     }
   }
   if (ch("wakeWord") || ch("keepAwake")) applyKeepAwake();
@@ -1192,6 +1397,15 @@ function onSheetCommand(cmd, detail = {}) {
       return undefined;
     case "brain_test":
       return brainTest(detail?.draft || {});
+    case "import_done":
+      importPending = null;
+      if (detail?.accepted) {
+        log("system", "Einstellungen übernommen.");
+        updateStatus();
+      }
+      return undefined;
+    case "wipe_done":
+      return undefined;
     default:
       return undefined;
   }
@@ -1218,8 +1432,14 @@ const hudCallbacks = {
   onInputFocus(focused) {
     inputFocused = !!focused;
     activity();
-    if (inputFocused) safe(() => ears.pauseWake(), null);
-    else resumeIdle();
+    if (inputFocused) {
+      safe(() => ears.pauseWake(), null);
+      return;
+    }
+    // Absenden blendet die Eingabe aus und startet gleich danach eine Runde: dann kein Weckwort-Start dazwischen
+    // (sonst startet und bricht die Erkennung bei jedem getippten Befehl ab – Android piept jedes Mal)
+    const my = turn;
+    setTimeout(() => { if (turn === my && !inputFocused) resumeIdle(); }, 0);
   },
   onLinkTap(link) {
     activity();
@@ -1230,6 +1450,7 @@ const hudCallbacks = {
   },
   onModelClosed() {
     activity();
+    syncHistory();
   },
 };
 
@@ -1238,8 +1459,11 @@ const sheetCallbacks = {
   onCommand: onSheetCommand,
   onOpenChange(name) {
     activity();
-    if (name) safe(() => ears.pauseWake(), null);
-    else resumeIdle();
+    if (name) {
+      safe(() => ears.pauseWake(), null);
+      safe(() => hud.hideToast(), null);                      // „Zum Öffnen antippen.“ gehört nicht über ein Blatt
+    } else resumeIdle();
+    syncHistory();
   },
   status() {
     const s = S();
@@ -1260,10 +1484,47 @@ const sheetCallbacks = {
   },
 };
 
+// ---------------------------------------------------------------- Zurück-Taste (Android, Browser-Zurück)
+// Offenes Blatt oder 3D-Modell = ein eigener Verlaufseintrag: „Zurück“ schließt es, statt Jarvis zu verlassen.
+function layerOpen() {
+  return !!(safe(() => sheets.isOpen(), false) || safe(() => hud.isModelOpen(), false));
+}
+
+function syncHistory() {
+  const open = layerOpen();
+  if (open && !historyPushed) {
+    try {
+      history.pushState({ jarvisLayer: true }, "");
+      historyPushed = true;
+    } catch { /* ignore */ }
+  } else if (!open && historyPushed) {
+    historyPushed = false;
+    if (history.state && history.state.jarvisLayer) {
+      ignorePops++;
+      try { history.back(); } catch { ignorePops--; }
+    }
+  }
+}
+
+function onPopState() {
+  if (ignorePops > 0) {
+    ignorePops--;
+    return;
+  }
+  if (!historyPushed) return;
+  historyPushed = false;
+  activity();
+  if (safe(() => sheets.isOpen(), false)) sheets.close();
+  else if (safe(() => hud.isModelOpen(), false)) hud.hideModel();
+  syncHistory();                                              // darunter noch etwas offen: neuer Eintrag
+}
+
 // ---------------------------------------------------------------- Dokument-Ereignisse
 function onVisibility() {
   if (document.visibilityState === "hidden") {
     hiddenAt = Date.now();
+    // die laufende Runde redet nicht im Hintergrund weiter (Text kommt ins Protokoll), robustness-9
+    if (state === "thinking" || state === "speaking" || state === "transcribing") mutedTurn = turn;
     voice.stop();
     safe(() => ears.pauseWake(), null);
     hud.setPaused(true);
@@ -1284,6 +1545,7 @@ function onKeyDown(e) {
     if (sheets.isOpen()) return;                              // Blätter schließt sheets.js
     if (hud.isModelOpen()) hud.hideModel();
     else if (hud.isImageOpen()) hud.hideImage();
+    syncHistory();
     return;
   }
   if (!e.ctrlKey || !e.altKey || e.metaKey) return;          // Mac-Tastenkürzel (CR3)
@@ -1311,7 +1573,10 @@ function onSetupLinkClick(e) {
 
 function onStoreTopics() {
   store.on("settings", (s) => applySettings(s || S()));
-  store.on("timers", (list) => hud.renderTimers(Array.isArray(list) ? list : store.timers()));
+  store.on("timers", (list) => {
+    hud.renderTimers(Array.isArray(list) ? list : store.timers());
+    scheduleTimerWake();
+  });
   store.on("konto", (k) => {
     hud.renderKonto(k ?? store.konto());
     hud.renderTermine(k ?? store.konto());
@@ -1355,22 +1620,26 @@ function continueBoot(reason) {
     enterStealth({ silent: true });
     log("system", "Hintergrund-Modus: lausche unsichtbar auf „Jarvis“.");
   } else {
-    setState("idle", L("idleBoot"));
-    log("system", L("readyLog"));
-    if (S().greeting) sayPresence({ followUp: true }).catch((e) => report("greeting", e));   // D7
+    const wakeOk = wakeAvailable();                           // Firefox, Mikrofon gesperrt: kein „Sag Hey Jarvis“
+    setState("idle", L(wakeOk ? "idleBoot" : "idleBootNoWake"));
+    log("system", L(wakeOk ? "readyLog" : "readyLogNoWake"));
+    // D7; nicht, solange die Frage „Einstellungen übernehmen?“ offen ist
+    if (S().greeting && !importPending) sayPresence({ followUp: true }).catch((e) => report("greeting", e));
     else resumeIdle();
   }
+  hud.setWakeHint(wakeAvailable());
   showNoListenHint();
   if (safe(() => voice.usesAzure(), false)) {
     voice.prewarm(voice.warmPhrases(A(), store.closingPhrase())).catch(() => 0);
   }
-  applyKeepAwake();
+  const p = applyKeepAwake();
+  scheduleTimerWake();
+  if (reason !== "normal") p.then(() => maybeAwakeCatcher());   // ios-1: Sperre gibt es auf dem iPhone nur per Tippen
 }
 
 async function init() {
-  let imp = { imported: false, wake: false };
+  const imp = BOOT_IMPORT;
   try { store.init(); } catch (e) { report("store", e); }
-  try { imp = store.importFromLocation() || imp; } catch (e) { report("setup link", e); }
   const s = S();
   lastSettings = s;
   intents.setAnrede(store.anrede());
@@ -1390,26 +1659,31 @@ async function init() {
   rm?.addEventListener?.("change", (ev) => hud.setReducedMotion(!!ev.matches));
 
   sheets.init(sheetCallbacks);
+  intents.setDevice?.(deviceNoun());
   voice.init({ settings: () => store.settings() });
   ears.init(earHandlers, { settings: () => store.settings(), audioContext: () => voice.audioContext() });
   ears.setTimings(timingsFrom(s));
   wireVoice();
   onStoreTopics();
   document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("popstate", onPopState);
   window.addEventListener("pageshow", (e) => { if (e.persisted && booted && S().listenOnOpen) wakeFromOutside(); });
+  voice.on("end", () => { if (state === "idle" && !listening) resumeIdle(); });   // Weckwort erst nach dem Sprechen
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("click", onSetupLinkClick, true);
   document.addEventListener("pointerdown", activity, { capture: true, passive: true });
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   setInterval(tick, TICK_MS);
 
-  if (imp.imported) {
-    log("system", "Einstellungen übernommen.");
-    hud.toast("Einstellungen übernommen.");
-  }
   if (imp.error) hud.toast("Der Setup-Link ist beschädigt.", 4000);
+  // Setup-Link (#cfg=): erst fragen, dann übernehmen – ein fremder Link darf nicht still Schlüssel, Notizen oder
+  // Kurzbefehle tauschen (security-privacy-1). Solange die Frage offen ist: normaler Start ohne Begrüßung.
+  importPending = imp.pending || null;
+  if (importPending) safe(() => sheets.open("import", { payload: importPending }), null);
 
-  bootReason = imp.wake || WAKE_PARAM ? "wake" : s.startInBackground ? "background" : "normal";
+  // „Beim Öffnen zuhören“ gilt auch beim Kaltstart (iOS beendet die Home-Bildschirm-App oft im Hintergrund)
+  bootReason = importPending ? "normal"
+    : imp.wake || WAKE_PARAM || s.listenOnOpen ? "wake" : s.startInBackground ? "background" : "normal";
   if (bootReason === "normal") {
     hud.showBoot("SYSTEME WERDEN HOCHGEFAHREN …");
     setTimeout(() => {

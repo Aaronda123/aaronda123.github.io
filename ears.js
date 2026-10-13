@@ -16,12 +16,20 @@
 // export function unlockInGesture(): Promise<boolean>     (call synchronously inside a tap handler)
 // export function listen({ followUp }?): { promise: Promise<ListenResult>, finish(), cancel() }
 // export function isListening(): boolean;  export function cancel()
+// export function blockReason(): "mic"|"service"|null   why native recognition is refused (service = Siri/Diktat aus)
+// export function micPermission(): "granted"|"denied"|"prompt"|null   Permissions API state of the microphone (cached)
+// A "mic" block is retried when the permission turns "granted" and on every return to the page (robustness-1); a
+// recognizer opened in a tap is not aborted before its onstart (pauseWake lets it finish the permission handshake).
+// export function joinResults(results): string            transcript of a SpeechRecognitionResultList (Android dedup)
 // One SpeechRecognition instance at a time; a wake hit hands the SAME session over as the command (D4, bug 21).
 // ==============================================================================================================
 // Jarvis' Ohren. Erste Wahl ist die Spracherkennung von iOS (live mitlesbar, Weckwort im selben Durchgang).
 // Ist sie gesperrt, nimmt Jarvis selbst auf (echte Pegel treiben die Kugel) und schickt die Aufnahme an
 // Azure Speech, sofern ein Azure-Schlüssel eingetragen ist. Sonst bleibt die Tastatur.
 // Satzende wie am Mac (Listener._record): Zögern 2,8 s → Schließen-Befehl 1,0 s → Stille 2,0 s.
+// Android: Chrome beendet jede Erkennung nach ein paar Sekunden Stille und piept bei jedem Start. Darum wartet
+// Jarvis dort zwischen zwei Durchgängen mit einem eigenen, lautlosen Mikrofon-Pegel auf Stimme und startet die
+// Erkennung erst dann (sonst piept das Handy auf dem Nachttisch alle paar Sekunden).
 import { matchWake, norm, isHesitant, endsWithHide } from "./intents.js";
 
 export const TIMINGS = Object.freeze({
@@ -51,6 +59,11 @@ const LEVEL_MS = 70;
 const STT_TIMEOUT_MS = 15000;
 const PRE_ROLL_BUFFERS = 4;         // ≈ 0.35 s before the voice onset (Azure recording)
 const DENIED = new Set(["not-allowed", "service-not-allowed"]);
+const NETWORK_DEAD_AFTER = 3;       // Brave & Co.: SpeechRecognition ohne Google-Dienst endet immer mit "network"
+const GATE_TICK_MS = 60;
+const GATE_CALIBRATE_MS = 400;
+const ANDROID_RETRY_MS = 3000;      // Android ohne Pegel-Wächter: längere Pause nach einem stillen Durchgang
+const ANDROID_RETRY_MAX_MS = 30000; // … wird verdoppelt, solange der Wächter nicht laufen kann (Ton gesperrt, robustness-13)
 const LEAD_SEP = /^[\s,.!?:;-]+/u;
 const STT_ALIAS = Object.freeze({
   silenceSeconds: "silenceMs", hesitationSeconds: "hesitationMs", maxRecordSeconds: "maxMs",
@@ -66,6 +79,12 @@ let inited = false;
 let wantWake = false;       // the app wants the wake word
 let paused = false;         // wake paused by the app (D5) or by the end of a listening session
 let blocked = false;        // native recognition refused (not-allowed / service-not-allowed)
+let blockedBy = null;       // "mic" (not-allowed) | "service" (service-not-allowed: Siri/Diktat aus, Dienst weg)
+let netFails = 0;           // aufeinanderfolgende Durchgänge, die nur mit "network" endeten (online)
+let nativeDead = false;     // für diesen Seitenaufruf unbrauchbar (Browser ohne Erkennungsdienst)
+let gate = null;            // Android: Pegel-Wächter zwischen zwei Erkennungen
+let gateFails = 0;          // Wächter konnte nicht laufen (z. B. Ton vor dem ersten Tippen gesperrt): länger warten
+let micPerm = null;         // Permissions API: "granted" | "denied" | "prompt" | null (unbekannt)
 let wState = "off";
 let lastEngine = null;
 const stateWaiters = [];
@@ -92,6 +111,19 @@ function call(name, ...args) {
 function getSR() {
   if (typeof window === "undefined") return null;
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+/** Native Erkennung vorhanden und nicht als unbrauchbar erkannt. */
+function srOk() {
+  return !!getSR() && !nativeDead;
+}
+
+function isAndroid() {
+  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent || "");
+}
+
+function online() {
+  return typeof navigator === "undefined" || navigator.onLine !== false;
 }
 
 function settingsNow() {
@@ -182,7 +214,93 @@ function reportEngine() {
 }
 
 function canRunWake() {
-  return wantWake && !paused && !blocked && !!getSR() && !cmd && isVisible();
+  return wantWake && !paused && !blocked && srOk() && !cmd && isVisible();
+}
+
+// Gesperrt nur, weil der Sprachdienst fehlte (Siri/Diktat aus, offline): beim Zurückkehren / Netz neu versuchen
+function retryService() {
+  if (!blocked || blockedBy !== "service") return;
+  blocked = false;
+  blockedBy = null;
+  reportEngine();
+  if (!wantWake) return;
+  if (wState === "blocked") setWakeState(paused || cmd ? "paused" : "starting");
+  if (canRunWake() && !cur) {
+    backoffIdx = 0;
+    startWakeSession(0);
+  }
+}
+
+// Gesperrt, weil das Mikrofon verweigert war: ist es jetzt erlaubt (Einstellungen geändert), neu starten (robustness-1)
+function retryMic() {
+  if (!blocked || blockedBy !== "mic") return;
+  blocked = false;
+  blockedBy = null;
+  reportEngine();
+  if (!wantWake) return;
+  if (wState === "blocked") setWakeState(paused || cmd ? "paused" : "starting");
+  if (canRunWake() && !cur) {
+    backoffIdx = 0;
+    startWakeSession(0);
+  }
+}
+
+function watchMicPermission() {
+  try {
+    const q = typeof navigator !== "undefined" && navigator.permissions && navigator.permissions.query;
+    if (typeof q !== "function") return;
+    navigator.permissions.query({ name: "microphone" }).then((st) => {
+      micPerm = st.state || null;
+      const onChange = () => {
+        micPerm = st.state || null;
+        if (micPerm === "granted") retryMic();
+      };
+      if (typeof st.addEventListener === "function") st.addEventListener("change", onChange);
+      else st.onchange = onChange;
+    }, () => { micPerm = null; });
+  } catch { micPerm = null; }
+}
+
+/** Bei der Rückkehr auf die Seite: Berechtigung neu lesen; erlaubt (oder unbekannt) → einmal neu versuchen. */
+function recheckMic() {
+  if (!blocked || blockedBy !== "mic") return;
+  let p = null;
+  try {
+    if (typeof navigator !== "undefined" && navigator.permissions && typeof navigator.permissions.query === "function") {
+      p = navigator.permissions.query({ name: "microphone" });
+    }
+  } catch { p = null; }
+  if (!p) { retryMic(); return; }
+  p.then((st) => {
+    micPerm = st.state || null;
+    if (micPerm !== "denied") retryMic();
+  }, () => retryMic());
+}
+
+function reviveNative() {
+  netFails = 0;
+  if (!nativeDead) return;
+  nativeDead = false;
+  logged.delete("network");
+  reportEngine();
+  if (wantWake && wState === "unsupported") {
+    setWakeState(paused || cmd ? "paused" : "starting");
+    if (canRunWake() && !cur) startWakeSession(0);
+  }
+}
+
+// Ein Durchgang endete nur mit "network" (ohne Ergebnis): nach NETWORK_DEAD_AFTER in Folge gilt die Erkennung hier
+// als nicht verfügbar (z. B. Brave); online-Ereignis oder Rückkehr auf die Seite probieren es neu.
+function countNetwork(s) {
+  if (s.error === "network" && !s.gotResult && online()) {
+    netFails++;
+    if (netFails >= NETWORK_DEAD_AFTER && !nativeDead) {
+      nativeDead = true;
+      stopGate();
+      reportEngine();
+      if (wantWake) setWakeState("unsupported");
+    }
+  } else if (s.gotResult || !s.error) netFails = 0;
 }
 
 // ---------------------------------------------------------------------------------------------- public API
@@ -194,17 +312,21 @@ export function init(handlers = {}, deps = {}) {
     if (typeof document !== "undefined" && document.addEventListener) {
       document.addEventListener("visibilitychange", onVisibility);
     }
+    if (typeof window !== "undefined" && window.addEventListener) {
+      window.addEventListener("online", () => { reviveNative(); retryService(); });
+    }
+    watchMicPermission();
   }
   lastEngine = null;
   reportEngine();
 }
 
 export function capabilities() {
-  return { native: !!getSR(), azure: azureAvailable(), standalone: isStandalone() };
+  return { native: srOk(), azure: azureAvailable(), standalone: isStandalone() };
 }
 
 export function engine() {
-  if (getSR() && !blocked) return "native";
+  if (srOk() && !blocked) return "native";
   if (azureAvailable()) return "azure";
   return "keyboard";
 }
@@ -228,13 +350,39 @@ export function wakeState() { return wState; }
 
 export function isListening() { return !!cmd; }
 
+/** Warum die native Erkennung gesperrt ist: "mic" (Mikrofon verweigert) | "service" (Sprachdienst aus) | null. */
+export function blockReason() { return blocked ? blockedBy || "mic" : null; }
+
+/** @returns {"granted"|"denied"|"prompt"|null} */
+export function micPermission() { return micPerm; }
+
+/**
+ * Text einer SpeechRecognitionResultList. Chrome auf Android liefert im continuous-Modus kumulative Ergebnisse
+ * („wie“, „wie spät“, „wie spät ist es“): ein Ergebnis, mit dessen Text das nächste beginnt, fällt weg.
+ * @param {ArrayLike<any>} results
+ * @returns {string}
+ */
+export function joinResults(results) {
+  const list = Array.from(results || [], (r) => collapse((r && r[0] && r[0].transcript) || ""));
+  const keys = list.map((t) => safeNorm(t));
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    if (!list[i]) continue;
+    const k = keys[i];
+    const next = keys[i + 1];
+    if (k && next && next.length >= k.length && (next === k || next.startsWith(`${k} `))) continue;
+    out.push(list[i]);
+  }
+  return collapse(out.join(" "));
+}
+
 export async function startWake() {
   wantWake = true;
   paused = false;
-  if (!getSR()) {
+  if (!srOk()) {
     if (wState !== "unsupported") {
       setWakeState("unsupported");
-      call("onLog", "system", LOG.noWake);
+      if (azureAvailable()) call("onLog", "system", LOG.noWake);   // sonst meldet app, dass hier nur Tippen geht
     }
     reportEngine();
     return wState;
@@ -259,16 +407,22 @@ export async function startWake() {
 export function pauseWake() {
   paused = true;
   wakeToken++;
+  stopGate();
   clearTimeout(restartTimer);
   restartTimer = null;
-  if (cur && cur.mode === "wake") stopCurrent();
+  if (cur && cur.mode === "wake") {
+    // gerade im Tippen gestartet und noch nicht angelaufen: erst die Erlaubnis abschließen lassen, dann beenden –
+    // sonst schlägt das Freischalten fehl und das Mikrofon bleibt gesperrt (robustness-1)
+    if (cur.gesture && !cur.gotStart && !cur.ended) cur.mode = "unlock";
+    else stopCurrent();
+  }
   if (wantWake && (wState === "on" || wState === "starting" || wState === "error")) setWakeState("paused");
 }
 
 export function resumeWake() {
   if (!wantWake) return;
   paused = false;
-  if (!getSR() || blocked || cmd) return;
+  if (!srOk() || blocked || cmd) return;
   if (cur && !cur.dead && (cur.mode === "wake" || cur.mode === "unlock")) {
     cur.mode = "wake";                                   // the unlock recognizer simply stays on
     if (cur.gotStart) setWakeState("on");
@@ -286,6 +440,7 @@ export function stopWake() {
   wantWake = false;
   paused = false;
   wakeToken++;
+  stopGate();
   clearTimeout(restartTimer);
   restartTimer = null;
   if (cur && (cur.mode === "wake" || cur.mode === "unlock")) stopCurrent();
@@ -297,7 +452,8 @@ export function cancel() {
 }
 
 export function unlockInGesture() {
-  if (!getSR()) return Promise.resolve(false);
+  if (!srOk()) return Promise.resolve(false);
+  stopGate();
   const s0 = settingsNow();
   // The recognizer of this tap becomes the wake session only if the wake word is wanted and not paused by
   // the app (D5: no open mic while Jarvis thinks or speaks); otherwise it is aborted right after onstart.
@@ -333,6 +489,7 @@ export function unlockInGesture() {
       if (settled) return;
       try {
         s = openSession(wake ? "wake" : "unlock", null);
+        s.gesture = true;
         const mine = s;
         mine.onStarted = () => {
           fin(true);
@@ -352,6 +509,7 @@ export function unlockInGesture() {
 
 export function listen({ followUp = false } = {}) {
   wakeToken++;
+  stopGate();
   clearTimeout(restartTimer);
   restartTimer = null;
   const eng = engine();
@@ -381,6 +539,7 @@ function openSession(mode, c) {
   const s = {
     id: ++sessionSeq, rec, mode, cmd: c, startedAt: Date.now(), gotStart: false, ended: false, dead: false,
     error: null, transcript: "", consumed: 0, endWaiters: [], endWatch: null, onStarted: null, onEndedCb: null,
+    gotResult: false,
   };
   rec.onstart = () => onStart(s);
   rec.onaudiostart = () => onStart(s);
@@ -426,6 +585,7 @@ function onStart(s) {
   logged.delete("nomic");
   if (blocked) {
     blocked = false;
+    blockedBy = null;
     reportEngine();
     if (wState === "blocked") setWakeState(s.mode === "wake" ? "on" : "paused");
   }
@@ -439,11 +599,13 @@ function onResult(s, e) {
   if (s.dead) return;
   let t = "";
   try {
-    t = collapse(Array.from((e && e.results) || [], (r) => (r && r[0] && r[0].transcript) || "").join(" "));
+    t = joinResults((e && e.results) || []);
   } catch { return; }
   if (!s.gotStart) onStart(s);
   if (s.dead) return;
   s.transcript = t;
+  if (t) s.gotResult = true;
+  netFails = 0;
   logged.delete("network");
   if (s.mode === "wake") wakeResult(s, t);
   else if (s.mode === "command" && s.cmd) commandResult(s.cmd, t);
@@ -455,6 +617,7 @@ function onError(s, e) {
   s.error = code;
   if (DENIED.has(code)) {
     blocked = true;
+    blockedBy = code === "service-not-allowed" ? "service" : "mic";
     reportEngine();
     if (wantWake) setWakeState("blocked");
   }
@@ -473,6 +636,7 @@ function onEnd(s) {
   if (s.dead) return;
   s.dead = true;
   if (cur === s) cur = null;
+  countNetwork(s);
   if (s.onEndedCb) { const f = s.onEndedCb; s.onEndedCb = null; f(); }
   if (s.mode === "command") commandSessionEnded(s);
   else if (s.mode === "wake") wakeSessionEnded(s);
@@ -481,6 +645,7 @@ function onEnd(s) {
 // ---------------------------------------------------------------------------------------------- wake word
 async function startWakeSession(attempt = 0) {
   const token = ++wakeToken;
+  stopGate();
   if (!canRunWake() || (cur && !cur.dead)) return;
   if (dying) {
     await dying;
@@ -515,8 +680,9 @@ function nextDelay(lived) {
 function wakeSessionEnded(s) {
   const lived = Date.now() - s.startedAt;
   const err = s.error;
-  if (err && DENIED.has(err)) return;                   // blocked: only unlockInGesture() restarts it
+  if (err && DENIED.has(err)) return;                   // blocked: unlockInGesture() (service: also visible/online)
   if (!wantWake) { setWakeState("off"); return; }
+  if (nativeDead) return;                               // countNetwork hat "unsupported" gemeldet
   if (err === "audio-capture") {
     logOnce("nomic", LOG.noMic);
     setWakeState("error");
@@ -528,18 +694,100 @@ function wakeSessionEnded(s) {
     if (wState === "on" || wState === "starting") setWakeState("paused");
     return;
   }
+  if (isAndroid() && (!err || err === "no-speech" || err === "aborted")) {
+    startGate();                                        // lautlos auf Stimme warten, dann erst neu starten (piept)
+    return;
+  }
   scheduleWake(nextDelay(lived));
+}
+
+// ---------------------------------------------------------------------------------------------- Android: Pegel-Wächter
+function stopGate() {
+  const g = gate;
+  if (!g) return;
+  gate = null;
+  g.dead = true;
+  clearInterval(g.timer);
+  try { if (g.src) g.src.disconnect(); } catch { /* ignore */ }
+  stopTracks(g.stream);
+}
+
+async function startGate() {
+  stopGate();
+  const token = wakeToken;
+  const g = { token, stream: null, src: null, an: null, buf: null, timer: 0, noise: [], thr: 0.02, loud: 0, startAt: 0, dead: false };
+  gate = g;
+  const fallback = () => {
+    if (gate === g) gate = null;
+    // ohne Wächter piept jeder Neustart: je öfter er nicht laufen kann, desto länger warten (robustness-13)
+    gateFails++;
+    const ms = Math.min(ANDROID_RETRY_MAX_MS, ANDROID_RETRY_MS * 2 ** Math.max(0, gateFails - 1));
+    if (!g.dead && token === wakeToken && canRunWake() && !cur) scheduleWake(ms);
+  };
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : null;
+  const ctx = audioCtx();
+  if (!md || typeof md.getUserMedia !== "function" || !ctx) { fallback(); return; }
+  if (ctx.state !== "running") {
+    try { await Promise.race([Promise.resolve(ctx.resume()).catch(() => {}), sleep(300)]); } catch { /* ignore */ }
+  }
+  if (g.dead) return;
+  if (ctx.state !== "running") { fallback(); return; }   // ohne Ton-Freigabe misst Web Audio nichts
+  let stream;
+  try {
+    stream = await md.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+  } catch { fallback(); return; }
+  if (g.dead || token !== wakeToken || !canRunWake() || cur) {
+    stopTracks(stream);
+    if (gate === g) gate = null;
+    return;
+  }
+  try {
+    g.stream = stream;
+    g.src = ctx.createMediaStreamSource(stream);
+    g.an = ctx.createAnalyser();
+    g.an.fftSize = 1024;
+    g.src.connect(g.an);
+    g.buf = new Float32Array(g.an.fftSize);
+  } catch { stopGate(); fallback(); return; }
+  g.startAt = Date.now();
+  gateFails = 0;
+  g.timer = setInterval(() => gateTick(g), GATE_TICK_MS);
+}
+
+function gateTick(g) {
+  if (gate !== g || g.dead) return;
+  if (g.token !== wakeToken || !canRunWake() || cur) { stopGate(); return; }
+  let rms = 0;
+  try {
+    g.an.getFloatTimeDomainData(g.buf);
+    let sum = 0;
+    for (let i = 0; i < g.buf.length; i++) sum += g.buf[i] * g.buf[i];
+    rms = Math.sqrt(sum / Math.max(1, g.buf.length));
+  } catch { stopGate(); scheduleWake(ANDROID_RETRY_MS); return; }
+  if (Date.now() - g.startAt < GATE_CALIBRATE_MS) { g.noise.push(rms); return; }
+  if (g.noise.length) { g.thr = noiseThreshold(g.noise); g.noise = []; }
+  if (rms > g.thr) {
+    if (++g.loud >= 2) {                                // Stimme: Erkennung starten (Mac: 2 laute Puffer)
+      stopGate();
+      backoffIdx = 0;
+      startWakeSession(0);
+    }
+  } else g.loud = 0;
 }
 
 function onVisibility() {
   if (!isVisible()) {
     wakeToken++;
+    stopGate();
     clearTimeout(restartTimer);
     restartTimer = null;
     if (cur && cur.mode === "wake") stopCurrent();
     if (wantWake && (wState === "on" || wState === "starting")) setWakeState("paused");
     return;
   }
+  if (nativeDead) reviveNative();
+  if (blocked && blockedBy === "service") { retryService(); return; }
+  if (blocked && blockedBy === "mic") { recheckMic(); return; }
   if (canRunWake() && !cur) {
     backoffIdx = 0;
     if (wState !== "on") setWakeState("starting");
@@ -703,12 +951,14 @@ function commandSessionEnded(s) {
   const err = s.error;
   if (err && DENIED.has(err)) {
     if (azureAvailable()) { switchToAzure(c); return; }
-    endCommand(c, "error", { error: { code: "denied", message: `Spracherkennung gesperrt (${err})` } });
+    const code = err === "service-not-allowed" ? "service" : "denied";
+    endCommand(c, "error", { error: { code, message: `Spracherkennung gesperrt (${err})` } });
     return;
   }
   if (err === "audio-capture") { endCommand(c, "error", { error: { code: "nomic", message: "Kein Mikrofon" } }); return; }
   if (err === "network") {
-    endCommand(c, "error", { error: { code: "network", message: "Spracherkennung ohne Netz" } });
+    if (nativeDead && azureAvailable()) { switchToAzure(c); return; }
+    endCommand(c, "error", { error: { code: nativeDead ? "unavailable" : "network", message: "Spracherkennung ohne Netz" } });
     return;
   }
   if (err === "language-not-supported") {
@@ -752,7 +1002,7 @@ function endCommand(c, reason, extra = {}) {
   if (extra.error) res.error = extra.error;
   if (cmd === c) cmd = null;
   if (cur && cur.cmd === c) stopCurrent();
-  if (wantWake && getSR() && !blocked && wState !== "unsupported") {
+  if (wantWake && srOk() && !blocked && wState !== "unsupported") {
     paused = true;                                      // the app resumes the wake word when idle (D5)
     setWakeState("paused");
   }
