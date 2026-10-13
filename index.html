@@ -1,0 +1,418 @@
+<!doctype html>
+<!-- J.A.R.V.I.S. fürs iPhone – statisches DOM (ARCHITECTURE.md §3.3, Texte §5, Ebenen §9.3, Kopf §9.10).
+     Hintergrund, Rahmen, Kopfzeile, Bühne mit dem Neuronen-Ball, Bild- und 3D-Box, Eingabezeile, sechs Panels zum
+     Wischen, Laufband; darüber Blätter (Einstellungen, „Hey Jarvis“, Daten), Schleier, Freischalten, Start, Hinweis. -->
+<html lang="de" data-theme="mac">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://upload.wikimedia.org; media-src 'self' blob: data:; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://*.tts.speech.microsoft.com https://*.stt.speech.microsoft.com https://api.binance.com https://api.coingecko.com https://api.frankfurter.app https://geocoding-api.open-meteo.com https://api.open-meteo.com https://de.wikipedia.org https://en.wikipedia.org; worker-src 'self'; manifest-src 'self'">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>JARVIS</title>
+<meta name="description" content="J.A.R.V.I.S. – persönlicher Sprachassistent">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta name="format-detection" content="telephone=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Jarvis">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="state-loading">
+
+  <!-- ===== Kosmischer Hintergrund (Milchstraße), liegt hinter allem ===== -->
+  <div id="galaxy" aria-hidden="true"><canvas id="gx-stars"></canvas><canvas id="gx-live"></canvas></div>
+
+  <!-- ===== Rahmen: Ecken, Gitter ===== -->
+  <div class="frame" aria-hidden="true">
+    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="grid"></div>
+  </div>
+
+  <div id="app">
+    <!-- ===== Kopfzeile ===== -->
+    <header class="topbar">
+      <div class="brand"><span class="logo">◈</span>J.A.R.V.I.S<span class="sub" id="brand-sub">COMMAND CENTER</span></div>
+      <div class="topclock" id="topclock">--:--</div>
+      <button class="close-x" id="close-btn" type="button" data-cmd="close" title="Ausblenden: Stimme aus, Jarvis hört weiter zu" aria-label="Ausblenden: Stimme aus, Jarvis hört weiter zu">✕</button>
+    </header>
+    <div class="topstatus"><span class="dot" id="top-dot"></span><b id="top-state">BOOT</b><span class="sep">│</span><span id="top-detail">Systeme werden hochgefahren …</span></div>
+    <div class="worldclocks" id="worldclocks"></div>
+
+    <!-- ===== Mitte: Sprachkugel (Neuronen-Ball), Bild, 3D-Modell ===== -->
+    <main class="stage-wrap" id="stage-wrap">
+      <button class="stage" id="stage" type="button" aria-label="Kugel: antippen zum Zuhören, Fertig oder Stopp">
+        <canvas id="orb" width="600" height="600"></canvas>
+        <span class="state-label" id="state-label">BOOT</span>
+      </button>
+      <!-- „Zeig mir ein Bild von …“ -->
+      <div id="imgview" aria-hidden="true"><img id="imgview-img" alt=""><span id="imgview-cap"></span></div>
+      <!-- „Zeig mir ein 3D-Modell von …“: deckt die Bühne ab, mit dem Finger drehbar -->
+      <div id="model3d" aria-hidden="true">
+        <canvas id="model3d-canvas"></canvas>
+        <span id="model3d-cap"></span>
+        <span id="model3d-hint">ZIEHEN: DREHEN · ZWEI FINGER: ZOOM · DOPPELTIPPEN: ZURÜCK</span>
+        <button id="model3d-close" type="button" title="Modell ausblenden" aria-label="Modell ausblenden">✕</button>
+      </div>
+      <!-- Telemetrie (nach Bild und 3D-Box, damit sie mit ihnen ausblendet) -->
+      <div class="telemetry" aria-hidden="true">
+        <div class="tm t1"><span>AUDIO.IN</span><b id="t-mic">—</b></div>
+        <div class="tm t2"><span>WAKE.WORD</span><b id="t-wake">AUS</b></div>
+        <div class="tm t3"><span>KI.KERN</span><b id="t-core">CLAUDE · AUTO</b></div>
+        <div class="tm t4"><span>LETZTE ANTWORT</span><b id="t-lat">—</b></div>
+      </div>
+    </main>
+
+    <!-- Links zum Antippen (iOS öffnet Links und Apps erst nach einer Berührung) -->
+    <div class="actionbar" id="actionbar"></div>
+
+    <!-- ===== Eingabezeile: tippen, diktieren oder live sehen, was Jarvis versteht ===== -->
+    <form class="cmdline" id="ask-form" autocomplete="off">
+      <span class="prompt" aria-hidden="true">›</span>
+      <input id="ask-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="sentences" enterkeyhint="send" placeholder="Frag Jarvis … oder sag „Hey Jarvis“" aria-label="Frage an Jarvis">
+      <button class="mic" id="mic-btn" type="button" data-cmd="mic" aria-label="Zuhören">◉</button>
+    </form>
+
+    <!-- ===== Panels zum Wischen ===== -->
+    <div class="deck" id="deck">
+      <div class="deck-track" id="deck-track">
+        <section class="panel page" id="p-clock" aria-label="SYS.ZEIT">
+          <header><span class="tag">SYS.ZEIT</span><span class="tag dim" id="uptime">UPTIME --</span></header>
+          <div class="clock"><span id="time">--:--</span><span class="sec" id="sec">--</span></div>
+          <div class="date" id="date">—</div>
+          <div class="calinfo"><span id="kw">KW --</span><span id="doy">TAG --</span><span id="yearbar"><i id="yearfill"></i></span></div>
+          <div class="timers" id="timers"></div>
+        </section>
+
+        <section class="panel page" id="p-termine" aria-label="TERMINE · WICHTIG">
+          <header><span class="tag">TERMINE · WICHTIG</span><span class="tag dim" id="ter-count">—</span></header>
+          <div class="termine" id="termine"></div>
+        </section>
+
+        <section class="panel page" id="p-log" aria-label="PROTOKOLL">
+          <header><span class="tag">PROTOKOLL</span><span class="tag dim" id="status">Systeme werden hochgefahren …</span></header>
+          <div class="log" id="log"></div>
+        </section>
+
+        <section class="panel page" id="p-konto" aria-label="KONTO · EINNAHMEN">
+          <header><span class="tag">KONTO · EINNAHMEN</span><span class="tag dim" id="inc-stand">KEINE DATEN</span></header>
+          <div class="kt-empty">Noch keine Werte. Sag z. B. „Mein Kontostand ist 2.400 Euro“ oder trag sie unter ⚙ → Daten ein.</div>
+          <div class="kt-body" hidden>
+            <div class="kt-top">
+              <div><span class="kt-lbl" id="kt-konto-lbl">KONTOSTAND</span><b class="kt-big" id="kt-konto">–</b><span class="kt-chg up" id="kt-chg">–</span></div>
+              <div class="kt-right"><span class="kt-lbl">PROFIT HEUTE</span><b class="kt-mid up" id="kt-heute">–</b><span class="kt-sub" id="kt-zahl">–</span></div>
+            </div>
+            <div class="kt-konten" id="kt-konten"></div>
+            <canvas id="kt-spark" width="660" height="70"></canvas>
+            <div class="kt-month">
+              <canvas id="kt-ring" width="96" height="96"></canvas>
+              <div><span class="kt-lbl">EINNAHMEN DIESER MONAT</span><b class="kt-mid" id="kt-monat">–</b><span class="kt-sub" id="kt-ziel">–</span></div>
+            </div>
+            <div class="kt-src" id="kt-src"></div>
+            <div class="kt-krypto" id="kt-krypto"></div>
+          </div>
+        </section>
+
+        <section class="panel page" id="p-system" aria-label="SYS.DIAGNOSE">
+          <header><span class="tag">SYS.DIAGNOSE</span><span class="tag dim" id="diag-state">ONLINE</span></header>
+          <div class="gauges">
+            <div class="gauge" id="g-mic"><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="track" cx="32" cy="32" r="26"/><circle class="bar" cx="32" cy="32" r="26"/></svg><b>--</b><span>MIC</span></div>
+            <div class="gauge" id="g-net"><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="track" cx="32" cy="32" r="26"/><circle class="bar" cx="32" cy="32" r="26"/></svg><b>--</b><span>NETZ</span></div>
+            <div class="gauge" id="g-lat"><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="track" cx="32" cy="32" r="26"/><circle class="bar" cx="32" cy="32" r="26"/></svg><b>--</b><span>LATENZ</span></div>
+          </div>
+          <canvas id="diag-graph" width="660" height="80"></canvas>
+          <div class="legend"><span class="l-mic">━ MIC</span><span class="l-lat">━ LATENZ</span></div>
+          <div class="net">
+            <div><span class="label">▲ TOKENS EIN</span><b id="tok-in">–</b></div>
+            <div><span class="label">▼ TOKENS AUS</span><b id="tok-out">–</b></div>
+          </div>
+        </section>
+
+        <section class="panel page" id="p-control" aria-label="KOMMANDO">
+          <header><span class="tag">KOMMANDO</span><span class="tag dim" id="auth-state">CLAUDE: PRÜFE …</span></header>
+          <div class="buttons">
+            <button type="button" data-cmd="listen">◉ Zuhören</button>
+            <button type="button" data-cmd="stop">■ Stopp</button>
+            <button type="button" data-cmd="new_session">↺ Neues Gespräch</button>
+            <button type="button" id="wake-btn" data-cmd="wake">◎ Wake-Word an</button>
+            <button type="button" data-cmd="voice">♪ Stimme</button>
+            <button type="button" id="focus-btn" data-cmd="focus">◇ Nur Kugel</button>
+          </div>
+          <div class="hotkeys">Kugel antippen: zuhören / fertig · zweimal auf Schwarz tippen: zurück</div>
+          <div class="row-end">
+            <button type="button" data-cmd="hide">◐ Ausblenden</button>
+            <button type="button" data-cmd="stealth" title="Still im Hintergrund: Stimme aus, schwarzer Bildschirm. Jarvis lauscht weiter, „Hey Jarvis“ holt ihn zurück.">☾ Hintergrund</button>
+            <button type="button" data-cmd="setup">⚙ Einstellungen</button>
+          </div>
+        </section>
+      </div>
+    </div>
+    <nav class="dots" id="dots" aria-label="Panels">
+      <button type="button" data-page="0" aria-label="SYS.ZEIT"></button>
+      <button type="button" data-page="1" aria-label="TERMINE"></button>
+      <button type="button" data-page="2" aria-label="PROTOKOLL"></button>
+      <button type="button" data-page="3" aria-label="KONTO"></button>
+      <button type="button" data-page="4" aria-label="SYS.DIAGNOSE"></button>
+      <button type="button" data-page="5" aria-label="KOMMANDO"></button>
+    </nav>
+
+    <!-- ===== Laufband unten ===== -->
+    <div class="ticker" aria-hidden="true"><div class="ticker-track" id="ticker"><span class="tk">KURSE WERDEN GELADEN …</span></div></div>
+  </div>
+
+  <!-- ===== Blatt: Einstellungen ===== -->
+  <section class="sheet" id="sheet-setup" hidden aria-label="Einstellungen">
+    <div class="sheet-head"><span class="tag">⚙ EINSTELLUNGEN</span><button type="button" class="close" data-close="setup" aria-label="Schließen">✕</button></div>
+    <form class="sheet-body" id="setup-form" autocomplete="off" novalidate>
+      <p class="hint install" id="install-hint">Tipp: Teilen → Zum Home-Bildschirm</p>
+
+      <section class="panel" id="sec-brain">
+        <header><span class="tag">GEHIRN</span><span class="tag dim chip" id="key-state">—</span></header>
+        <p class="hint first">Ohne Schlüssel kann Jarvis schon Uhrzeit, Timer, Wetter, Bilder, Links, 3D-Modelle und „merk dir …“. Zum Mitdenken braucht er ein Gehirn.</p>
+        <div class="radios" role="radiogroup" aria-label="Gehirn">
+          <label class="check"><input type="radio" name="f-provider" id="f-provider-auto" value="auto"> Automatisch</label>
+          <label class="check"><input type="radio" name="f-provider" id="f-provider-gemini" value="gemini"> Gemini (kostenlos)</label>
+          <label class="check"><input type="radio" name="f-provider" id="f-provider-claude" value="claude"> Claude (kostet pro Gespräch)</label>
+        </div>
+        <label for="f-gemini">Gemini-Schlüssel (kostenlos)</label>
+        <input id="f-gemini" type="password" placeholder="AIza…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <p class="hint">Kostenlos: aistudio.google.com/apikey öffnen, mit deinem Google-Konto anmelden, „API-Schlüssel erstellen“ tippen, Schlüssel hier einfügen. Keine Zahlung nötig. Hinweis: Im kostenlosen Tarif darf Google die Gespräche zur Verbesserung seiner Dienste nutzen.</p>
+        <label for="f-anthropic">Claude-API-Schlüssel (optional, kostenpflichtig)</label>
+        <input id="f-anthropic" type="password" placeholder="sk-ant-…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <p class="hint">console.anthropic.com → API Keys. Abrechnung pro Gespräch, meist ein paar Cent. Beste Qualität, wie am Mac.</p>
+        <button type="button" data-cmd="brain_test">Testen</button>
+      </section>
+
+      <section class="panel" id="sec-voice">
+        <header><span class="tag">STIMME</span><span class="tag dim chip" id="voice-state">—</span></header>
+        <label for="f-preset">Stimme</label>
+        <select id="f-preset">
+          <option value="geraet">Gerätestimme (kostenlos)</option>
+          <option value="butler">Butler (Azure, optional) – tief, ruhig wie am Mac</option>
+          <option value="florian">Florian (Azure, optional) – deine frühere Stimme</option>
+          <option value="killian">Killian (Azure, optional) – klar und sachlich</option>
+          <option value="andrew">Andrew (Azure, optional) – Deutsch mit leichtem Akzent</option>
+        </select>
+        <p class="hint">Butler, Florian, Killian, Andrew: optional, braucht einen eigenen Azure-Schlüssel.</p>
+        <label for="f-voice-speed">Tempo (%)</label>
+        <input id="f-voice-speed" type="number" min="-30" max="50" step="1" placeholder="0">
+        <details class="sub" id="sec-azure">
+        <summary>Optional: Butler-Stimme über Azure (eigener Schlüssel nötig)</summary>
+        <label for="f-azure">Azure-Speech-Schlüssel (optional)</label>
+        <input id="f-azure" type="password" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <label for="f-region">Azure-Region</label>
+        <select id="f-region">
+          <option value="germanywestcentral">Germany West Central</option>
+          <option value="westeurope">West Europe</option>
+          <option value="northeurope">North Europe</option>
+          <option value="swedencentral">Sweden Central</option>
+          <option value="francecentral">France Central</option>
+          <option value="uksouth">UK South</option>
+          <option value="switzerlandnorth">Switzerland North</option>
+          <option value="eastus">East US</option>
+          <option value="westus2">West US 2</option>
+        </select>
+        <p class="hint">Ohne Azure-Schlüssel spricht Jarvis kostenlos mit der besten deutschen Stimme deines Geräts. Die Butler-Stimme vom Mac (Microsoft „Conrad“) gibt es offiziell nur über Azure: portal.azure.com → Speech-Dienst anlegen, Tarif „Free F0“ → „Schlüssel und Endpunkt“.</p>
+        </details>
+        <button type="button" data-cmd="voice_test">♪ Stimme testen</button>
+      </section>
+
+      <section class="panel" id="sec-profile">
+        <header><span class="tag">PROFIL</span></header>
+        <label for="f-anrede">Anrede</label>
+        <input id="f-anrede" type="text" placeholder="Boss" autocomplete="off" autocapitalize="words" spellcheck="false">
+        <label for="f-vorname">Vorname</label>
+        <input id="f-vorname" type="text" placeholder="z. B. Alex" autocomplete="off" autocapitalize="words" spellcheck="false">
+        <label for="f-firma">Firma (erscheint oben neben COMMAND CENTER)</label>
+        <input id="f-firma" type="text" autocomplete="off" autocapitalize="words" spellcheck="false">
+        <label for="f-wohnort">Wohnort (für das Wetter)</label>
+        <input id="f-wohnort" type="text" autocomplete="off" autocapitalize="words" spellcheck="false">
+        <label for="f-gedaechtnis">Gedächtnis – was Jarvis über dich wissen soll</label>
+        <textarea id="f-gedaechtnis" rows="5"></textarea>
+        <button type="button" class="link" data-cmd="open_data">Gespeichertes ansehen</button>
+      </section>
+
+      <section class="panel" id="sec-wake">
+        <header><span class="tag">WAKE-WORD</span><span class="chips"><span class="tag dim chip" id="mic-state">—</span><span class="tag dim chip" id="wake-state">—</span></span></header>
+        <label class="check"><input id="f-wake" type="checkbox"> „Jarvis“ / „Hey Jarvis“ hören, solange die App offen ist</label>
+        <label class="check"><input id="f-background" type="checkbox"> Im Hintergrund starten (schwarzer Bildschirm, lauscht)</label>
+        <label class="check"><input id="f-listen-open" type="checkbox"> Beim Öffnen zuhören</label>
+        <label class="check"><input id="f-greeting" type="checkbox"> Begrüßung beim Start („Ja, Boss?“)</label>
+        <label class="check"><input id="f-keepawake" type="checkbox"> Bildschirm wach halten, solange Jarvis lauscht</label>
+        <button type="button" data-cmd="open_help">„Hey Jarvis“ einrichten</button>
+      </section>
+
+      <section class="panel" id="sec-look">
+        <header><span class="tag">ANZEIGE</span></header>
+        <label for="f-theme">Farbe</label>
+        <select id="f-theme">
+          <option value="mac">Rot (wie das Mac-Overlay)</option>
+          <option value="tuerkis">Türkis</option>
+        </select>
+        <label for="f-autohide">Nach Minuten ohne Aktivität ausblenden (0 = nie)</label>
+        <input id="f-autohide" type="number" min="0" max="120" step="1" inputmode="numeric">
+      </section>
+
+      <details class="panel" id="sec-fine">
+        <summary><span class="tag">FEINEINSTELLUNGEN</span></summary>
+        <label for="f-silence">Pause bis zur Antwort (s)</label>
+        <input id="f-silence" type="number" min="0.6" max="4" step="0.1" inputmode="decimal">
+        <label for="f-hesitation">Pause nach „äh“/„und“ (s)</label>
+        <input id="f-hesitation" type="number" min="1" max="5" step="0.1" inputmode="decimal">
+        <label for="f-maxrecord">Längste Aufnahme (s)</label>
+        <input id="f-maxrecord" type="number" min="10" max="90" step="1" inputmode="numeric">
+        <label for="f-sentences">Vorgelesene Sätze</label>
+        <input id="f-sentences" type="number" min="1" max="8" step="1" inputmode="numeric">
+        <label for="f-imageseconds">Bild-Anzeige (s)</label>
+        <input id="f-imageseconds" type="number" min="3" max="120" step="1" inputmode="numeric">
+        <label for="f-closing">Frage nach Befehlen (leer = keine)</label>
+        <input id="f-closing" type="text" autocomplete="off" spellcheck="false">
+      </details>
+
+      <section class="panel" id="sec-links">
+        <header><span class="tag">SETUP-LINK</span></header>
+        <div class="btnrow">
+          <button type="button" data-cmd="copy_setup_link">Setup-Link kopieren</button>
+          <button type="button" data-cmd="copy_shortcut_link">Kurzbefehl-Link kopieren</button>
+        </div>
+        <p class="hint warn">Die Links enthalten deine Schlüssel. Nur in deinen eigenen Kurzbefehl einfügen, nicht weitergeben.</p>
+      </section>
+
+      <p class="hint center">Schlüssel und Profil bleiben nur auf diesem Gerät gespeichert.</p>
+      <button type="submit" class="primary">Speichern</button>
+    </form>
+  </section>
+
+  <!-- ===== Blatt: „Hey Jarvis“ einrichten ===== -->
+  <section class="sheet" id="sheet-help" hidden aria-label="„Hey Jarvis“ einrichten">
+    <div class="sheet-head"><span class="tag">„HEY JARVIS“ EINRICHTEN</span><button type="button" class="close" data-close="help" aria-label="Schließen">✕</button></div>
+    <div class="sheet-body help">
+      <div class="hint install" id="help-standalone"></div>
+      <div class="devices" role="tablist" aria-label="Gerät">
+        <button type="button" role="tab" data-device="ios">iPhone / iPad</button>
+        <button type="button" role="tab" data-device="android">Android</button>
+        <button type="button" role="tab" data-device="desktop">Computer</button>
+      </div>
+
+      <section class="panel" data-device="ios">
+        <h3>1. Jarvis auf den Home-Bildschirm (Seite 2)</h3>
+        <p class="step"><b>1.</b> Öffne in Safari <span id="help-url">die Adresse dieser App</span>.</p>
+        <p class="step"><b>2.</b> Tippe auf „Teilen“ (Quadrat mit Pfeil nach oben) → „Zum Home-Bildschirm“ → Name „Jarvis“ → „Hinzufügen“. „Als Web-App öffnen“ bleibt eingeschaltet.</p>
+        <p class="step"><b>3.</b> Halte das neue Jarvis-Symbol gedrückt → „Home-Bildschirm bearbeiten“ → zieh es nach rechts auf die zweite Seite → „Fertig“.</p>
+        <p class="step"><b>4.</b> Öffne Jarvis über das Symbol. Erlaube Mikrofon und Spracherkennung, wenn das iPhone fragt. Ein Schlüssel ist nicht nötig; zum Mitdenken trag unter ⚙ Einstellungen einen kostenlosen Gemini-Schlüssel ein und tippe „Speichern“.</p>
+      </section>
+
+      <section class="panel" data-device="android" hidden>
+        <h3>1. Jarvis auf den Startbildschirm</h3>
+        <p class="step"><b>1.</b> Öffne in Chrome <span class="help-url-copy">die Adresse dieser App</span>.</p>
+        <p class="step"><b>2.</b> Chrome → ⋮ → „Zum Startbildschirm hinzufügen“ bzw. „App installieren“.</p>
+        <p class="step"><b>3.</b> Öffne Jarvis über das neue Symbol und erlaube das Mikrofon, wenn Chrome fragt. Das Wake-Word funktioniert, solange die Seite offen ist.</p>
+      </section>
+
+      <section class="panel" data-device="desktop" hidden>
+        <h3>1. Jarvis auf dem Computer</h3>
+        <p class="step"><b>1.</b> Öffne <span class="help-url-copy">die Adresse dieser App</span> in Chrome, Edge oder Safari.</p>
+        <p class="step"><b>2.</b> In Chrome/Edge in der Adresszeile auf das Installieren-Symbol klicken oder einfach die Seite als Lesezeichen speichern.</p>
+        <p class="step"><b>3.</b> Erlaube das Mikrofon, wenn der Browser fragt. Tastenkürzel: Strg+Alt+Leertaste zuhören, Strg+Alt+J ein/aus, Strg+Alt+K nur Kugel. In Firefox gibt es keine Spracherkennung, dort tippst du einfach.</p>
+      </section>
+
+      <section class="panel">
+        <h3>2. „Hey Jarvis“, während Jarvis offen ist</h3>
+        <p>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Verpiss dich und bleib still im Hintergrund offen“). Der Bildschirm bleibt dafür an; am besten hängt das iPhone am Ladekabel. Sperrst du das iPhone oder wechselst die App, hört Jarvis nicht mehr zu.</p>
+      </section>
+
+      <section class="panel" data-device="ios">
+        <h3>3. „Hey Jarvis“, wenn Jarvis zu ist (iOS 18 oder neuer)</h3>
+        <p>Das iPhone selbst lauscht dann auf deinen Satz und öffnet Jarvis.</p>
+        <p class="step"><b>1.</b> Tippe in Jarvis unter ⚙ Einstellungen auf „Kurzbefehl-Link kopieren“.</p>
+        <p class="step"><b>2.</b> Öffne die App „Kurzbefehle“ → „+“ → „Aktion hinzufügen“ → suche „URL öffnen“ → tippe auf „URL“ und füge den kopierten Link ein. Nenne den Kurzbefehl „Jarvis“ → „Fertig“.</p>
+        <p class="step"><b>3.</b> Öffne Einstellungen → Bedienungshilfen → Sprachkurzbefehle → „Sprachkurzbefehle einrichten“ (bzw. „Aktion hinzufügen“) → unter „Kurzbefehle“ „Jarvis“ wählen → sag dreimal deutlich „Hey Jarvis“ → „Fertig“. Soll auch „Jarvis“ allein gehen, leg einen zweiten Sprachkurzbefehl mit dem Satz „Jarvis“ an.</p>
+        <p class="step"><b>4.</b> Test: Sag „Hey Jarvis“. Das iPhone öffnet Jarvis (gesperrt: erst entsperren), Jarvis sagt „Ja, Boss?“ und hört zu. Fragt Jarvis „Tippen, um Jarvis zu starten“, tippe einmal auf den Bildschirm – iOS gibt Ton und Mikrofon erst nach einer Berührung frei.</p>
+        <p class="note">Gut zu wissen: Der Kurzbefehl öffnet Jarvis eventuell in Safari statt als Home-Bildschirm-App. Safari hat einen eigenen Speicher; deshalb steckt im Link (nach „#cfg=“) eine Kopie deiner Einstellungen samt Schlüsseln. Gib den Link nicht weiter. Die Bezeichnungen in den iOS-Einstellungen können je nach iOS-Version leicht abweichen. Siehst du in „Kurzbefehle“ bei „App öffnen“ die Web-App „Jarvis“, kannst du stattdessen diese Aktion nehmen und in Jarvis „Beim Öffnen zuhören“ einschalten.</p>
+      </section>
+
+      <section class="panel">
+        <h3>4. Was Jarvis auf dem iPhone nicht kann</h3>
+        <p>Mails, Google-Kalender, Lautstärke, Musiksteuerung, Mac-Programme öffnen und schließen, den Hotspot und WhatsApp vorlesen erledigt weiter der Jarvis am Mac. Links und Apps öffnet iOS erst nach einem Antippen: Jarvis zeigt sie als Knopf über der Eingabezeile. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+      </section>
+      <button type="button" data-cmd="open_setup">⚙ Einstellungen</button>
+    </div>
+  </section>
+
+  <!-- ===== Blatt: Daten ===== -->
+  <section class="sheet" id="sheet-data" hidden aria-label="Daten">
+    <div class="sheet-head"><span class="tag">DATEN</span><button type="button" class="close" data-close="data" aria-label="Schließen">✕</button></div>
+    <div class="sheet-body">
+      <section class="panel">
+        <header><span class="tag">GEMERKT</span></header>
+        <div class="data-list" id="data-facts"></div>
+        <button type="button" data-cmd="facts_clear">Alles vergessen</button>
+      </section>
+      <section class="panel">
+        <header><span class="tag">KURZBEFEHLE</span></header>
+        <div class="data-list" id="data-shortcuts"></div>
+        <button type="button" data-cmd="shortcuts_clear">Alle löschen</button>
+      </section>
+      <section class="panel">
+        <header><span class="tag">TERMINE</span></header>
+        <div class="data-list" id="data-termine"></div>
+      </section>
+      <section class="panel">
+        <header><span class="tag">KONTO</span></header>
+        <textarea id="data-konto" rows="8" spellcheck="false" autocapitalize="off" autocorrect="off" aria-label="Konto (JSON)"></textarea>
+        <div class="btnrow">
+          <button type="button" data-cmd="konto_import">Übernehmen</button>
+          <button type="button" data-cmd="konto_clear">Leeren</button>
+        </div>
+        <p class="hint">Format wie data/einnahmen.json am Mac.</p>
+      </section>
+      <section class="panel">
+        <header><span class="tag">GESPRÄCH</span></header>
+        <div class="data-text" id="data-history"></div>
+        <div class="btnrow">
+          <button type="button" data-cmd="history_clear">Gespräch löschen</button>
+          <button type="button" data-cmd="log_clear">Protokoll leeren</button>
+        </div>
+      </section>
+      <section class="panel">
+        <header><span class="tag">VERBRAUCH</span></header>
+        <div class="data-text" id="data-usage"></div>
+      </section>
+      <section class="panel">
+        <header><span class="tag">ALLES</span></header>
+        <button type="button" class="danger" data-cmd="wipe_all">Alles löschen (auch Schlüssel)</button>
+      </section>
+    </div>
+  </section>
+
+  <!-- ===== Schleier: ausgeblendet / still im Hintergrund (zweimal tippen = zurück) ===== -->
+  <div id="veil" aria-hidden="true"><span id="veil-hint"></span></div>
+
+  <!-- ===== Freischalten: iOS gibt Ton und Mikrofon erst nach einer Berührung frei ===== -->
+  <div id="unlock" hidden role="button" tabindex="0"><span id="unlock-text">Tippen, um Jarvis zu starten</span></div>
+
+  <!-- ===== Startbildschirm ===== -->
+  <div id="boot" hidden aria-hidden="true">
+    <span class="boot-brand">◈ J.A.R.V.I.S</span>
+    <span class="boot-line" id="boot-line">SYSTEME WERDEN HOCHGEFAHREN …</span>
+    <span class="boot-tip" hidden>TIPP: TEILEN → ZUM HOME-BILDSCHIRM</span>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Bildschirm wach halten (Notlösung ohne Wake Lock): stummes schwarzes Video -->
+  <video id="awake-video" src="media/awake.mp4" muted playsinline loop preload="none" aria-hidden="true" tabindex="-1"></video>
+
+  <script src="galaxy.js"></script>
+  <script src="neuro.js"></script>
+  <script src="model3d.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
