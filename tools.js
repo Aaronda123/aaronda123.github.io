@@ -4,11 +4,17 @@
 // (YouTube, Spotify, Google, Apple Maps on Apple devices / Google Maps elsewhere, tel:, wa.me, Amazon), weather
 // (open-meteo), Wikipedia images, 3D models
 // (Mac model_spec) and orb commands as UI results, timers / notes / shortcuts / konto / termine / settings via
-// store.js, learn guard. Mac-only types answer honestly. Imports: store.js, intents.js. No DOM. runAction() never throws.
+// store.js, learn guard. Mac-only types answer honestly. Imports: store.js, intents.js, mitdenken.js, google.js. No DOM.
+// runAction() never throws.
+// Google (v4): calendar_list / mail_list / mail_read read and answer themselves; calendar_create, mail_draft and
+// mail_send NEVER write: they return { confirm } (what Jarvis shows and asks); only app.js calls runConfirmed() after his
+// explicit „ja“ or a tap. Mail content is untrusted: app.js limits the answer after reading a mail to SAFE_AFTER_MAIL.
 // ==============================================================================================================
 
 import * as store from "./store.js";
 import * as intents from "./intents.js";
+import { parseAt, clock } from "./mitdenken.js";
+import * as google from "./google.js";
 
 /** @typedef {{ type: string, [field: string]: any }} Action */
 /** @typedef {{ url: string, label: string, icon: string }} Link  icon: "↗"|"▶"|"♫"|"⌖"|"☎"|"✉"|"🛒" */
@@ -49,10 +55,16 @@ export const LINK_ACTIONS = Object.freeze(new Set([
 export const PHONE_ACTIONS = Object.freeze(new Set([
   ...LINK_ACTIONS,
   "timer", "timer_stop", "weather", "show_image", "next_image", "hide_image",
-  "show_model", "hide_model", "model_adjust", "orb_reset", "orb_zoom",
+  "show_model", "hide_model", "model_adjust", "orb_reset", "orb_zoom", "orb_shape", "show_text", "web_panel",
   "remember", "forget_note", "learn_command", "forget_command", "hide_jarvis",
   "einnahme", "kontostand", "termin", "termin_loeschen", "set_setting",
+  "calendar_list", "calendar_create", "mail_list", "mail_read", "mail_draft", "mail_send",
 ]));
+
+/** Google Kalender / Gmail (v4). Schreibende davon (WRITE_ACTIONS) laufen nur über confirm → runConfirmed(). */
+export const GOOGLE_ACTIONS = Object.freeze(new Set(["calendar_list", "calendar_create", "mail_list", "mail_read",
+  "mail_draft", "mail_send"]));
+export const WRITE_ACTIONS = Object.freeze(new Set(["calendar_create", "mail_draft", "mail_send"]));
 
 /** Learn actions (live Mac LEARN_ACTIONS minus teach_jarvis): need LEARN_SIGNAL in the user's words and no web (D18). */
 export const LEARN_ACTIONS = Object.freeze(new Set([
@@ -75,7 +87,18 @@ export const MAC_ONLY = Object.freeze(new Map([
 export const SAFE_AFTER_WEB = Object.freeze(new Set([
   "timer", "timer_stop", "weather", "show_image", "next_image", "hide_image", "open_url", "web_search", "youtube",
   "spotify", "maps", "route", "amazon", "hide_jarvis", "show_model", "hide_model", "model_adjust", "orb_reset",
-  "orb_zoom",
+  "orb_zoom", "orb_shape", "show_text",
+  "calendar_list", "mail_list", "calendar_create",   // lesen bzw. nur mit seinem „ja“ (zeigt den Termin vorher)
+]));
+
+/**
+ * Nach dem Lesen einer Mail (Mac SAFE_AFTER_MAIL): nur Aktionen ohne Ziel aus fremdem Text; alles, was schreibt, geht
+ * ohnehin erst nach seinem „ja“ (confirm). Nie Links, Anrufe, WhatsApp oder Lernen.
+ */
+export const SAFE_AFTER_MAIL = Object.freeze(new Set([
+  "timer", "timer_stop", "weather", "show_image", "next_image", "hide_image", "show_text", "show_model", "hide_model",
+  "model_adjust", "orb_reset", "orb_zoom", "orb_shape", "hide_jarvis",
+  "calendar_list", "calendar_create", "mail_list", "mail_read", "mail_draft", "mail_send",
 ]));
 
 /** Not allowed inside a stealth combo (§6.5; links, pictures and models need the visible overlay). */
@@ -95,8 +118,15 @@ export const SETTING_KEYS = Object.freeze({
   max_record_seconds: Object.freeze({ key: "maxRecordSeconds", type: "int", min: 10, max: 90, what: "wie lange du am Stück reden darfst (Sekunden)" }),
   speak_max_sentences: Object.freeze({ key: "speakMaxSentences", type: "int", min: 1, max: 8, what: "wie viele Sätze Jarvis vorliest" }),
   home_city: Object.freeze({ key: "wohnort", type: "str", min: 2, max: 60, what: "Ort für das Wetter" }),
-  closing_phrase: Object.freeze({ key: "closingPhrase", type: "str", min: 0, max: 80, what: "Frage nach einem Befehl (leer = keine)" }),
+  closing_phrase: Object.freeze({ key: "closingPhrase", type: "str", min: 0, max: 80, what: "Frage am Ende eines erledigten Ablaufs (leer = keine)" }),
   voice_speed: Object.freeze({ key: "voiceSpeed", type: "int", min: -30, max: 50, what: "Tempo der Stimme in Prozent" }),
+  // Mac 13.10. abends: Satzende in drei Stufen, Mitdenken und Plaudern
+  unsure_seconds: Object.freeze({ key: "unsureSeconds", type: "float", min: 0.8, max: 4.0, what: "Sprechpause, wenn der Satz vielleicht noch weitergeht (Sekunden)" }),
+  proactive_offers: Object.freeze({ key: "proactiveOffers", type: "bool", min: 0, max: 1, what: "nächste Schritte vorschlagen" }),
+  follow_up_after_offer: Object.freeze({ key: "followUpAfterOffer", type: "bool", min: 0, max: 1, what: "nach einem Vorschlag kurz zuhören" }),
+  follow_up_after_question: Object.freeze({ key: "followUpAfterQuestion", type: "bool", min: 0, max: 1, what: "nach einer Rückfrage kurz zuhören" }),
+  follow_up_smalltalk: Object.freeze({ key: "followUpSmalltalk", type: "bool", min: 0, max: 1, what: "beim Plaudern ohne „Jarvis“ weiter zuhören" }),
+  smalltalk_follow_seconds: Object.freeze({ key: "smalltalkFollowSeconds", type: "int", min: 2, max: 15, what: "wie lange Jarvis beim Plaudern auf deinen nächsten Satz wartet (Sekunden)" }),
 });
 
 // ---------------------------------------------------------------- private: intents access (contract §3.2.4)
@@ -427,6 +457,37 @@ function normDay(v) {
   return "heute";
 }
 
+/** „spiegel“ → https://www.spiegel.de (bekannte Seiten wie „öffne …“); sonst "". */
+function siteUrlFor(name) {
+  const n = str(name, 60);
+  if (!n || typeof intents.openTarget !== "function") return "";
+  try {
+    const t = intents.openTarget(n, "öffne", false);
+    return t && t.type === "open_url" && t.url ? httpsOnly(t.url) || "" : "";
+  } catch {
+    return "";
+  }
+}
+
+const CAL_DAYS = new Set(["heute", "morgen", "übermorgen", "woche", "wochenende", "montag", "dienstag", "mittwoch",
+  "donnerstag", "freitag", "samstag", "sonntag"]);
+const WHEN_RX = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const EMAIL_RX = /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[a-z]{2,}$/i;
+
+/** „2026-10-17T15:00“ / „2026-10-17“ → { date, allDay } (Ortszeit) oder null. */
+function parseWhen(v) {
+  const t = str(v, 40);
+  const m = WHEN_RX.exec(t);
+  if (!m) return null;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/.test(t) && m[4] != null) {
+    const d = new Date(t);
+    return Number.isNaN(d.getTime()) ? null : { date: d, allDay: false };
+  }
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0), Number(m[5] || 0));
+  if (Number.isNaN(d.getTime()) || d.getMonth() !== Number(m[2]) - 1) return null;
+  return { date: d, allDay: m[4] == null };
+}
+
 /**
  * Validate, coerce and alias a raw action (§6.4.3 field rules; Mac aliases whatsapp_write, site_search, open_site,
  * spotify {cmd}; remember/forget_note accept `fact` as an alias of `text`, `forget` → forget_note).
@@ -456,9 +517,29 @@ export function normalizeAction(raw) {
   if (MAC_ONLY.has(type)) return { ...a, type };
   switch (type) {
     case "timer": {
-      const n = typeof a.seconds === "number" ? a.seconds : parseAmount(String(a.seconds ?? ""));
+      let n = typeof a.seconds === "number" ? a.seconds : parseAmount(String(a.seconds ?? ""));
+      if ((!Number.isFinite(n) || n <= 0) && a.at) { // Erinnerung zu einer Uhrzeit (Mac timer „at“, 13.10. abends)
+        const end = parseAt(a.at);
+        n = end ? Math.round((end.getTime() - Date.now()) / 1000) : NaN;
+        if (!Number.isFinite(n) || n < 1 || n > 86400) return null;
+        return { type, seconds: Math.trunc(n), label: str(a.label, 30) || "Erinnerung", reminder: true };
+      }
       if (!Number.isFinite(n) || n <= 0) return null;
-      return { type, seconds: Math.max(1, Math.min(86400, Math.trunc(n))), label: str(a.label, 30) };
+      const out = { type, seconds: Math.max(1, Math.min(86400, Math.trunc(n))), label: str(a.label, 30) };
+      if (a.reminder === true) out.reminder = true;
+      return out;
+    }
+    case "show_text": // „zeig mir kurz … aus Wikipedia“: schwebender Text; leerer Text blendet ihn aus
+      return { type, title: str(a.title, 60), text: String(a.text ?? "").trim().slice(0, 900), source: str(a.source, 80) };
+    case "web_panel": { // Mac: Webseite im Overlay. Handy: geht als Link (die meisten Seiten verbieten das Einbetten)
+      if (a.close) return { type, close: true };
+      const url = httpsOnly(a.url);
+      const name = str(a.name ?? a.label, 60);
+      return url || name ? { type, url: url || "", name } : null;
+    }
+    case "orb_shape": {
+      const shape = str(a.shape, 20).toLowerCase();
+      return ["ringe", "kern", "galaxie", "netz", "schalen", "reset"].includes(shape) ? { type, shape } : null;
     }
     case "timer_stop":
       return { type, label: str(a.label, 30) };
@@ -555,6 +636,41 @@ export function normalizeAction(raw) {
     }
     case "set_setting":
       return { type, key: str(a.key, 40).toLowerCase(), value: a.value };
+    case "calendar_list": {
+      if (a.next === true || a.next === "true" || str(a.day, 20).toLowerCase() === "next") return { type, next: true };
+      const d = str(a.day, 20).toLowerCase().replace(/^am\s+/, "").replace(/^diese\s+/, "");
+      return { type, day: CAL_DAYS.has(d) ? d : "heute" };
+    }
+    case "calendar_create": {
+      const w = parseWhen(a.start ?? a.wann ?? a.new_start);
+      const title = str(a.title ?? a.titel, 120);
+      if (!w || !title) return null;
+      const e = parseWhen(a.end ?? a.new_end);
+      const out = { type, title, start: w.date.getTime(), allDay: w.allDay || a.allDay === true };
+      if (e && e.date > w.date) out.end = e.date.getTime();
+      const loc = str(a.location ?? a.ort, 120);
+      if (loc) out.location = loc;
+      return out;
+    }
+    case "mail_list":
+      return { type };
+    case "mail_read": {
+      const out = { type };
+      const from = str(a.from ?? a.von ?? a.name, 80);
+      const index = Math.trunc(Number(a.index));
+      if (from) out.from = from;
+      if (Number.isFinite(index) && index >= 1 && index <= 20) out.index = index;
+      if (a.full === true || a.full === "true") out.full = true;
+      if (a.last === true || a.last === "true") out.last = true;
+      return out;
+    }
+    case "mail_draft":
+    case "mail_send": {
+      const text = String(a.text ?? a.body ?? "").replace(/\r/g, "").trim().slice(0, 4000);
+      const out = { type, to: str(a.to, 120), subject: str(a.subject, 160), text };
+      if (a.reply === true || a.reply === "true") out.reply = true;
+      return out;
+    }
     default:
       return null;
   }
@@ -952,6 +1068,11 @@ function changeSetting(key, value, anrede) {
   if (spec.type === "str") {
     v = value === undefined || value === null ? "" : String(value).trim();
     if (!(v.length >= spec.min && v.length <= spec.max)) return { err: say("settingValue", {}, anrede) };
+  } else if (spec.type === "bool") { // Mac change_setting: Schalter mit „an“/„aus“, ja/nein, true/false
+    const word = String(value ?? "").trim().toLowerCase();
+    if (value === true || ["true", "1", "an", "ein", "ja", "on", "yes", "aktiv", "wahr"].includes(word)) v = true;
+    else if (value === false || ["false", "0", "aus", "nein", "off", "no", "inaktiv", "falsch"].includes(word)) v = false;
+    else return { err: say("settingValue", {}, anrede) };
   } else {
     let f;
     try { f = pyFloat(String(value ?? "").replace(/,/g, ".").replace(/%+$/, "")); } catch { f = NaN; }
@@ -963,6 +1084,311 @@ function changeSetting(key, value, anrede) {
   }
   store.setSettings({ [spec.key]: v });
   return { err: "", value: v };
+}
+
+// ---------------------------------------------------------------- Google: Kalender und Gmail (v4)
+
+const DAY_MS = 86400000;
+const WD_KEYS = ["sonntag", "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag"];
+const LIST_MAX = 5;
+
+function dayStart(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/** Zeitraum zu „heute“, „morgen“, „woche“, „freitag“ …: { from, to, label, Label } (label für den Satz). */
+export function calendarRange(day, now = new Date()) {
+  const d0 = dayStart(now);
+  const add = (n) => new Date(d0.getTime() + n * DAY_MS);
+  const k = String(day || "heute").toLowerCase();
+  if (k === "morgen") return { from: add(1), to: add(2), label: "morgen" };
+  if (k === "übermorgen") return { from: add(2), to: add(3), label: "übermorgen" };
+  if (k === "woche") {
+    const left = (7 - now.getDay()) % 7;                     // bis Sonntagabend; am Sonntag: die nächsten 7 Tage
+    return { from: now, to: add((left || 7) + 1), label: "diese Woche" };
+  }
+  if (k === "wochenende") {
+    const sat = (6 - now.getDay() + 7) % 7;
+    const from = now.getDay() === 0 ? d0 : add(sat);
+    return { from: from < now ? now : from, to: now.getDay() === 0 ? add(1) : add(sat + 2), label: "am Wochenende" };
+  }
+  const wd = WD_KEYS.indexOf(k);
+  if (wd >= 0) {
+    const diff = (wd - now.getDay() + 7) % 7;
+    return { from: diff ? add(diff) : now, to: add(diff + 1), label: diff ? `am ${WEEKDAYS[wd]}` : "heute" };
+  }
+  return { from: now, to: add(1), label: "heute" };
+}
+
+function upFirst(t) {
+  const s = String(t || "");
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/** „heute um 15 Uhr“, „morgen um 9:30 Uhr“, „am Freitag, 17.10. um 15 Uhr“, ganztägig ohne Uhrzeit. */
+export function whenText(date, allDay = false, now = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  const days = Math.round((dayStart(d) - dayStart(now)) / DAY_MS);
+  const day = days === 0 ? "heute" : days === 1 ? "morgen" : days === 2 ? "übermorgen"
+    : `am ${WEEKDAYS[d.getDay()]}, ${d.getDate()}.${d.getMonth() + 1}.`;
+  return allDay ? `${day} ganztägig` : `${day} um ${clock(d)}`;
+}
+
+/** Ein Eintrag fürs Vorlesen: „um 15 Uhr Zahnarzt“ (Tag nur, wenn die Liste mehrere Tage hat). */
+function entryText(e, withDay, now) {
+  const when = withDay ? whenText(e.start, e.allDay, now) : e.allDay ? "ganztägig" : `um ${clock(e.start)}`;
+  return `${when} ${e.title}`;
+}
+
+function joinList(items) {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} und ${items[items.length - 1]}`;
+}
+
+/** Termine seiner Jarvis-Liste im selben Format wie die von Google. */
+function localEvents(from, to) {
+  let list = [];
+  try { list = store.upcomingTermine(dayStart(from), Math.ceil((to - dayStart(from)) / DAY_MS) + 1); } catch { list = []; }
+  return list.map((t) => {
+    const start = new Date(t.at);
+    return { id: `local-${t.id}`, title: String(t.titel || "Termin"), start, allDay: !!t.allDay, location: String(t.ort || ""),
+      end: new Date(start.getTime() + (t.allDay ? DAY_MS : 3600000)), local: true };
+  }).filter((e) => e.end > from && e.start < to);
+}
+
+/** Was Jarvis bei einem Google-Problem sagt, und was er dazu anbietet (googleNeed für app.js: Knopf). */
+export function googleProblem(e, A, kind = "calendar") {
+  const code = e?.code || "http";
+  if (code === "aborted") return { say: "", googleNeed: null };
+  if (code === "notConfigured") return { say: say("googleSetup", {}, A), googleNeed: "setup" };
+  if (code === "needsTap" || code === "loading" || code === "scope") {
+    const k = e?.kind || kind;
+    const first = !!e?.first || code === "scope";
+    if (first && k === "mail") return { say: say("googleFirstMail", {}, A), googleNeed: "mail" };
+    if (first) return { say: say("googleFirstCal", {}, A), googleNeed: "connect" };
+    return { say: say("googleTap", {}, A), googleNeed: k === "mail" ? "mail" : "connect" };
+  }
+  if (code === "denied" || code === "closed") return { say: say("googleDenied", {}, A), googleNeed: kind === "mail" ? "mail" : "connect" };
+  if (code === "apiOff") {
+    return { say: say("googleApiOff", { api: kind === "mail" ? "Gmail-API" : "Google-Calendar-API" }, A), googleNeed: "setup" };
+  }
+  if (code === "network" || code === "timeout") return { say: say("googleNet", {}, A), googleNeed: null };
+  if (code === "notFound") return { say: say(kind === "mail" ? "mailNotFoundPlain" : "googleErr", {}, A), googleNeed: null };
+  return { say: say("googleErr", {}, A), googleNeed: null };
+}
+
+function googleFail(type, e, A, kind) {
+  const p = googleProblem(e, A, kind);
+  return { type, ok: false, say: p.say, googleNeed: p.googleNeed, google: e?.code || "http" };
+}
+
+async function calendarList(a, ctx, A) {
+  const now = ctx.now instanceof Date ? ctx.now : new Date();
+  const range = a.next ? { from: now, to: new Date(dayStart(now).getTime() + 15 * DAY_MS), label: "" } : calendarRange(a.day, now);
+  let list = localEvents(range.from, range.to);
+  let usedGoogle = false;
+  if (google.configured()) {
+    try {
+      const ev = await google.events({ from: range.from, to: range.to, max: 50, signal: ctx.signal });
+      usedGoogle = true;
+      const seen = new Set(ev.map((e) => `${e.title.toLowerCase()}|${e.start.getTime()}`));
+      list = [...ev, ...list.filter((e) => !seen.has(`${e.title.toLowerCase()}|${e.start.getTime()}`))];
+    } catch (e) {
+      if (!list.length || e?.code === "aborted") return googleFail("calendar_list", e, A, "calendar");
+      // Google gerade nicht erreichbar: wenigstens die eigene Liste, dazu der Hinweis
+      const p = googleProblem(e, A, "calendar");
+      list.sort((x, y) => x.start - y.start);
+      const r = calendarSay(list, a, range, now, A);
+      return { type: "calendar_list", ok: true, say: `${r.say} ${p.say}`.trim(), text: r.text, googleNeed: p.googleNeed };
+    }
+  }
+  list = list.filter((e) => e.end > now).sort((x, y) => x.start - y.start);
+  const r = calendarSay(list, a, range, now, A, !usedGoogle && !google.configured());
+  return { type: "calendar_list", ok: true, say: r.say, text: r.text,
+    log: { kind: "tool", text: `Kalender · ${a.next ? "nächster Termin" : range.label} · ${list.length}` } };
+}
+
+function calendarSay(list, a, range, now, A, localOnly = false) {
+  if (a.next) {
+    const e = list[0];
+    if (!e) return { say: say(localOnly ? "calNoneNextLocal" : "calNoneNext", {}, A) };
+    return { say: say("calNext", { list: `${e.title}, ${whenText(e.start, e.allDay, now)}` }, A),
+      text: { title: "Nächster Termin", text: `${e.title}\n${upFirst(whenText(e.start, e.allDay, now))}${e.location ? `\n${e.location}` : ""}`,
+        source: e.local ? "Jarvis-Liste" : "Google Kalender", seconds: 20 } };
+  }
+  const Day = upFirst(range.label);
+  if (!list.length) return { say: say(localOnly ? "calNoneLocal" : "calNone", { day: Day, tag: range.label }, A) };
+  const multiDay = dayStart(list[0].start).getTime() !== dayStart(list[list.length - 1].start).getTime();
+  const items = list.slice(0, LIST_MAX).map((e) => entryText(e, multiDay, now));
+  let text = say(list.length === 1 ? "calOne" : "calMany", { day: Day, n: list.length, list: joinList(items) }, A);
+  if (list.length > LIST_MAX) text += ` ${say("calMore", { n: list.length - LIST_MAX }, A)}`;
+  const card = list.slice(0, 8).map((e) => `${multiDay ? `${WEEKDAYS[e.start.getDay()].slice(0, 2)} ` : ""}`
+    + `${e.allDay ? "ganztägig" : `${String(e.start.getHours()).padStart(2, "0")}:${String(e.start.getMinutes()).padStart(2, "0")}`} ${e.title}`);
+  return { say: text, text: list.length > 1 ? { title: Day, text: card.join("\n"), source: "Kalender", seconds: 25 } : undefined };
+}
+
+function calendarConfirm(a, ctx, A) {
+  const now = ctx.now instanceof Date ? ctx.now : new Date();
+  const start = new Date(a.start);
+  if (Number.isNaN(start.getTime())) return { type: "calendar_create", ok: false, say: say("terminValue", {}, A) };
+  const end = a.end ? new Date(a.end) : new Date(start.getTime() + (a.allDay ? DAY_MS : 3600000));
+  const when = whenText(start, a.allDay, now);
+  const question = say("calQuestion", { title: a.title, when }, A);
+  const span = a.allDay ? "ganztägig" : `${clock(start)} bis ${clock(end)}`;
+  return {
+    type: "calendar_create", ok: true, say: question,
+    confirm: {
+      kind: "calendar", op: "create",
+      event: { title: a.title, start: start.getTime(), end: end.getTime(), allDay: !!a.allDay, location: a.location || "" },
+      question,
+      card: { title: "Termin eintragen?", foot: "Eingetragen wird erst nach deinem „ja“.", seconds: 180,
+        text: `${a.title}\n${upFirst(when.replace(/ um .*$/, ""))} · ${span}${a.location ? `\n${a.location}` : ""}` },
+      buttons: [{ id: "ja", label: "Eintragen", icon: "✓" }, { id: "nein", label: "Nein", icon: "✕" }],
+    },
+    log: { kind: "draft", text: `Termin? ${a.title} · ${when}` },
+  };
+}
+
+function mailLine(m) {
+  return `von ${m.from}: ${m.subject}`;
+}
+
+async function mailList(ctx, A) {
+  let list;
+  try {
+    list = await google.unread({ max: 8, signal: ctx.signal });
+  } catch (e) {
+    return googleFail("mail_list", e, A, "mail");
+  }
+  if (!list.length) return { type: "mail_list", ok: true, say: say("mailNone", {}, A), log: { kind: "tool", text: "Gmail · keine neuen" } };
+  const items = list.slice(0, LIST_MAX).map(mailLine);
+  let text = say(list.length === 1 ? "mailOne" : "mailMany", { n: list.length, list: joinList(items) }, A);
+  if (list.length > LIST_MAX) text += ` ${say("calMore", { n: list.length - LIST_MAX }, A)}`;
+  return { type: "mail_list", ok: true, say: text,
+    text: { title: list.length === 1 ? "1 neue Mail" : `${list.length} neue Mails`, source: "Gmail", seconds: 25,
+      text: list.slice(0, 8).map((m) => `${m.from} – ${m.subject}`).join("\n") },
+    log: { kind: "tool", text: `Gmail · ${list.length} ungelesen` } };
+}
+
+/** Zum Vorlesen eine Zeile: Absätze und Zeilenumbrüche der Mail werden Leerzeichen. */
+function flat(t) {
+  return String(t || "").replace(/\s+/g, " ").trim();
+}
+
+/** Beim Vorlesen ohne Gehirn: Absender, Betreff und der Anfang (Rest im Textfeld). */
+function mailHead(m, A) {
+  return say("mailHead", { from: m.from, subject: m.subject }, A);
+}
+
+async function mailRead(a, ctx, A) {
+  try {
+    if (a.full || a.last) {
+      const last = google.lastMail();
+      if (!last) return { type: "mail_read", ok: false, say: say("mailNoneRead", {}, A) };
+      if (a.full) {
+        return { type: "mail_read", ok: true, mail: last, full: true,
+          say: last.text ? `${mailHead(last, A)} ${flat(last.text)}` : say("mailNoText", {}, A),
+          text: { title: last.subject, text: last.text.slice(0, 900), source: `Gmail · ${last.from}`, seconds: 60 } };
+      }
+    }
+    const hit = await google.findMail({ from: a.from || "", index: a.index || 0, signal: ctx.signal });
+    if (!hit) return { type: "mail_read", ok: false, say: a.from ? say("mailNotFound", { from: a.from }, A) : say("mailNone", {}, A) };
+    const m = await google.readMail(hit.id, { signal: ctx.signal });
+    return { type: "mail_read", ok: true, mail: m,
+      say: m.text ? `${mailHead(m, A)} ${flat(m.text)}` : `${mailHead(m, A)} ${say("mailNoText", {}, A)}`,
+      text: { title: m.subject, text: m.text.slice(0, 900), source: `Gmail · ${m.from}`, seconds: 60 },
+      log: { kind: "tool", text: `Gmail · ${m.from} · ${m.subject}` } };
+  } catch (e) {
+    return googleFail("mail_read", e, A, "mail");
+  }
+}
+
+/** Empfänger und Antwort-Bezug: E-Mail-Adresse, Name aus gelesenen/gelisteten Mails oder Antwort auf die letzte. */
+function resolveMail(a) {
+  const last = google.lastMail();
+  const to = String(a.to || "").trim();
+  const norm = (x) => String(x || "").toLowerCase().normalize("NFC").replace(/\s+/g, " ").trim();
+  let reply = null;
+  if (last && (a.reply || !to || norm(last.from).includes(norm(to)) || norm(last.fromEmail) === norm(to))) reply = last;
+  let address = "";
+  let name = "";
+  if (reply) {
+    address = reply.replyTo || reply.fromEmail;
+    name = reply.from;
+  } else if (EMAIL_RX.test(to)) {
+    address = to;
+    name = to;
+  } else if (to) {
+    const hit = google.lastList().find((m) => norm(m.from).includes(norm(to)));
+    if (hit) { address = hit.fromEmail; name = hit.from; }
+  }
+  if (!address || !EMAIL_RX.test(address)) return { error: to ? "noAddress" : "noTo", to };
+  let subject = String(a.subject || "").trim();
+  if (reply && !subject) subject = /^(re|aw|antw):/i.test(reply.subject) ? reply.subject : `Re: ${reply.subject}`;
+  return { mail: { to: address, name: name || address, subject: subject || "(ohne Betreff)", body: a.text,
+    threadId: reply?.threadId || "", inReplyTo: reply?.messageId || "",
+    references: reply ? [reply.references, reply.messageId].filter(Boolean).join(" ").trim() : "" } };
+}
+
+function mailConfirm(a, A) {
+  const type = a.type;
+  if (!String(a.text || "").trim()) return { type, ok: false, say: say("mailEmpty", {}, A) };
+  const r = resolveMail(a);
+  if (r.error) return { type, ok: false, say: r.error === "noTo" ? say("mailNoTo", {}, A) : say("mailNoAddress", { to: r.to }, A) };
+  const m = r.mail;
+  const send = type === "mail_send";
+  const short = m.body.replace(/\s+/g, " ").trim();
+  const question = say(send ? "mailSendQuestion" : "mailDraftQuestion",
+    { to: m.name, text: short.length > 200 ? `${short.slice(0, 199)}…` : short }, A);
+  return {
+    type, ok: true, say: question,
+    confirm: {
+      kind: "mail", op: send ? "send" : "draft", mail: m, question,
+      card: { title: send ? "Mail senden?" : "Entwurf speichern?", seconds: 180,
+        foot: send ? "Gesendet wird erst nach deinem „ja“." : "Gespeichert wird erst nach deinem „ja“.",
+        text: `An: ${m.name === m.to ? m.to : `${m.name} <${m.to}>`}\nBetreff: ${m.subject}\n\n${m.body.slice(0, 1200)}` },
+      buttons: send
+        ? [{ id: "ja", label: "Senden", icon: "➤" }, { id: "entwurf", label: "Nur Entwurf", icon: "✎" }, { id: "nein", label: "Nein", icon: "✕" }]
+        : [{ id: "ja", label: "Als Entwurf speichern", icon: "✎" }, { id: "nein", label: "Nein", icon: "✕" }],
+    },
+    log: { kind: "draft", text: `${send ? "Mail" : "Entwurf"} an ${m.to}: ${short.slice(0, 160)}` },
+  };
+}
+
+/**
+ * Bestätigte Schreib-Aktion ausführen – NUR app.js ruft das, nach seinem „ja“ oder einem Tippen auf den Knopf.
+ * @param {{ kind: "calendar"|"mail", op: "create"|"send"|"draft", event?, mail? }} pending
+ * @param {"ja"|"entwurf"} choice  "entwurf" = statt Senden nur als Entwurf speichern
+ * @param {ActionContext} ctx
+ * @returns {Promise<ActionResult>}
+ */
+export async function runConfirmed(pending, choice = "ja", ctx = {}) {
+  const A = String(ctx?.anrede || "").trim() || safeAnrede();
+  const signal = ctx?.signal;
+  if (!isObj(pending)) return { type: "", ok: false };
+  try {
+    if (pending.kind === "calendar" && pending.op === "create" && isObj(pending.event)) {
+      const ev = pending.event;
+      await google.createEvent({ title: ev.title, start: new Date(ev.start), end: new Date(ev.end), allDay: ev.allDay,
+        location: ev.location }, { signal });
+      const when = whenText(new Date(ev.start), ev.allDay, ctx?.now instanceof Date ? ctx.now : new Date());
+      return { type: "calendar_create", ok: true, say: say("calCreated", { title: ev.title, when }, A),
+        log: { kind: "tool", text: `Kalender · eingetragen · ${ev.title} · ${when}` }, refreshEvents: true };
+    }
+    if (pending.kind === "mail" && isObj(pending.mail)) {
+      const m = pending.mail;
+      if (pending.op === "send" && choice !== "entwurf") {
+        await google.sendMail(m, { signal });
+        return { type: "mail_send", ok: true, say: say("mailSent", {}, A), log: { kind: "tool", text: `Gmail · gesendet an ${m.to}` } };
+      }
+      await google.saveDraft(m, { signal });
+      return { type: "mail_draft", ok: true, say: say("mailDrafted", {}, A), log: { kind: "tool", text: `Gmail · Entwurf an ${m.to}` } };
+    }
+    return { type: "", ok: false };
+  } catch (e) {
+    const kind = pending.kind === "mail" ? "mail" : "calendar";
+    return googleFail(kind === "mail" ? "mail_send" : "calendar_create", e, A, kind);
+  }
 }
 
 // ---------------------------------------------------------------- run
@@ -999,10 +1425,26 @@ export async function runAction(action, ctx = {}) {
     const a = action;
     switch (type) {
       case "timer": {
-        const t = store.addTimer(a.seconds, a.label || "", now.getTime());
+        const t = store.addTimer(a.seconds, a.label || "", now.getTime(), { reminder: a.reminder === true });
+        const at = new Date(t.ends);
         return { type, ok: true, timer: t,
-          log: { kind: "tool", text: `Timer · ${sayDuration(t.seconds)}${t.label ? " · " + t.label : ""}` } };
+          log: { kind: "tool", text: t.reminder ? `Erinnerung · ${at.getHours()}:${String(at.getMinutes()).padStart(2, "0")} · ${t.label}`
+            : `Timer · ${sayDuration(t.seconds)}${t.label ? " · " + t.label : ""}` } };
       }
+      case "show_text":
+        return { type, ok: true, text: { title: a.title || "", text: a.text || "", source: a.source || "", seconds: 30 },
+          log: a.text ? { kind: "tool", text: `Text · ${a.title || str(a.text, 40)}` } : undefined };
+      case "web_panel": {
+        if (a.close) return { type, ok: true };
+        const url = a.url || siteUrlFor(a.name);
+        if (!url) return { type, ok: false, say: say("webPanelWhich", {}, A) };
+        const link = linkFor({ type: "open_url", url, label: a.name || "" });
+        if (!link) return { type, ok: false };
+        return { type, ok: true, link, say: say("webPanelLink", { name: link.label }, A),
+          log: { kind: "tool", text: `Öffnen · ${link.label}` } };
+      }
+      case "orb_shape":
+        return { type, ok: true, orb: a.shape === "reset" ? { op: "form" } : { op: "shape", shape: a.shape } };
       case "timer_stop": {
         const gone = store.cancelTimers(a.label || undefined);
         if (!gone.length) return { type, ok: false, say: say("noTimer", {}, A) };
@@ -1107,6 +1549,26 @@ export async function runAction(action, ctx = {}) {
         if (err) return { type, ok: false, say: err };
         return { type, ok: true, log: { kind: "tool", text: `Einstellung · ${a.key} = ${typeof value === "string" ? `„${value}“` : value}` } };
       }
+      case "calendar_list":
+        return await calendarList(a, { ...c, now }, A);
+      case "calendar_create":
+        if (!google.configured()) {                          // ohne Google: wie bisher in seine Jarvis-Liste
+          const d = new Date(a.start);
+          const wann = a.allDay ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+            : google.localIso(d).slice(0, 16);
+          const err = store.addTermin({ titel: a.title, wann, ort: a.location || "" }, now.getTime());
+          if (err) return { type, ok: false, say: say("terminValue", {}, A) };
+          return { type, ok: true, log: { kind: "tool", text: `Termin · ${a.title}` } };
+        }
+        return calendarConfirm(a, { ...c, now }, A);
+      case "mail_list":
+        return await mailList(c, A);
+      case "mail_read":
+        return await mailRead(a, c, A);
+      case "mail_draft":
+      case "mail_send":
+        if (!google.configured()) return { type, ok: false, say: say("googleSetup", {}, A), googleNeed: "setup" };
+        return mailConfirm(a, A);
       default:
         return { type, ok: false, log: { kind: "system", text: `Unbekannte Aktion: ${type}` } };
     }

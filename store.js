@@ -13,6 +13,10 @@
 // the history keeps the first message with the notes when it is trimmed and carries webSeen (D18 across reloads);
 // wipe("all") also empties the "jarvis-tts" speech cache (wipeDone()); a "storage" event from another window of the
 // same origin reloads the changed key, so two windows never write back each other's stale state.
+// v4: settings.googleClientId (validated GOOGLE_CLIENT_RX, only in the Setup-Code, never in a link); meta.setupDone /
+// setupHow via setupDone() / markSetupDone(how) („Jarvis einrichten“); googleLink() / setGoogleLink(patch|null) (which
+// Google parts he allowed + account e-mail, KEYS.google); SESSION_KEYS.googleToken is google.js' sessionStorage key,
+// removed by wipe("all").
 // ==============================================================================================================
 
 /** @typedef {typeof DEFAULT_SETTINGS} Settings  ARCHITECTURE.md §8.2 (frozen snapshot; closingPhrase null = default line, "" = none) */
@@ -34,7 +38,12 @@ export const KEYS = Object.freeze({
   usage: "jarvis.v2.usage",
   meta: "jarvis.v2.meta",
   orb: "jarvis.v2.orb", // written by hud.js ({ x, y, zoom }); store only removes it in wipe("all")
+  orbForm: "jarvis.v2.orbform", // written by neuro.js ({ shape, sk, sdx, sdy, spread }); removed in wipe("all")
+  google: "jarvis.v2.google", // google.js: { calendar, mail, email, at } – which Google parts he allowed (no token)
 });
+
+/** sessionStorage key of google.js (access token, ≤ 1 h; never in localStorage). wipe("all") removes it too. */
+export const SESSION_KEYS = Object.freeze({ googleToken: "jarvis.v2.gtoken" });
 
 /** v1 keys of the first phone PWA; migrated once by init() (§8.5), then removed. */
 export const LEGACY_KEYS = Object.freeze({ settings: "jarvis-settings-v1", timers: "jarvis-timers" });
@@ -49,9 +58,15 @@ export const DEFAULT_SETTINGS = Object.freeze({
   theme: "mac", focus: false, deckPage: 2, autoHideMinutes: 10,
   gedaechtnis: "",
   closingPhrase: null,
-  silenceSeconds: 2.0, hesitationSeconds: 2.8, maxRecordSeconds: 50, noSpeechSeconds: 6, followUpSeconds: 4,
+  // Satzende wie am Mac seit 13.10. abends: fertig 0,9 s, unsicher 1,5 s, mittendrin („… und“, „äh“) 2,0 s
+  silenceSeconds: 0.9, unsureSeconds: 1.5, hesitationSeconds: 2.0, maxRecordSeconds: 50, noSpeechSeconds: 6, followUpSeconds: 4,
   followUpAfterAnswer: false, speakMaxSentences: 3, speakMaxChars: 380, imageSeconds: 7, idleFadeSeconds: 45,
   galaxyBrightness: 0.3,
+  // Mitdenken und Plaudern (Mac DEFAULTS jarvis.py L90-114)
+  proactiveOffers: true, followUpAfterOffer: true, followUpAfterQuestion: true, followUpSmalltalk: true,
+  smalltalkFollowSeconds: 6,
+  // Google Kalender + Gmail (eigene OAuth-Client-ID, nur im Browser; leer = aus)
+  googleClientId: "",
 });
 
 /** §8.2 – numeric clamps [min, max] applied by setSettings(). Enums and string lengths: see §8.2. */
@@ -60,7 +75,9 @@ export const LIMITS = Object.freeze({
   autoHideMinutes: Object.freeze([0, 120]),
   deckPage: Object.freeze([0, 5]),
   silenceSeconds: Object.freeze([0.6, 4.0]),
+  unsureSeconds: Object.freeze([0.8, 4.0]),
   hesitationSeconds: Object.freeze([1.0, 5.0]),
+  smalltalkFollowSeconds: Object.freeze([2, 15]),
   maxRecordSeconds: Object.freeze([10, 90]),
   noSpeechSeconds: Object.freeze([3, 15]),
   followUpSeconds: Object.freeze([2, 10]),
@@ -92,8 +109,10 @@ const THEMES = new Set(["mac", "tuerkis"]);
 const REGIONS = new Set(["germanywestcentral", "westeurope", "northeurope", "swedencentral", "francecentral",
   "uksouth", "switzerlandnorth", "eastus", "westus2"]);
 const STRING_MAX = { anrede: 20, vorname: 40, firma: 60, wohnort: 60, gedaechtnis: MAX.gedaechtnisChars,
-  closingPhrase: 80, anthropicKey: 400, geminiKey: 400, azureKey: 400 };
-const INT_KEYS = new Set(["voiceSpeed", "autoHideMinutes", "deckPage", "maxRecordSeconds", "noSpeechSeconds",
+  closingPhrase: 80, anthropicKey: 400, geminiKey: 400, azureKey: 400, googleClientId: 200 };
+// OAuth-Client-ID einer Webanwendung („123…-abc….apps.googleusercontent.com“); leer = Google aus
+export const GOOGLE_CLIENT_RX = /^[0-9]{5,}-[a-z0-9]{8,}\.apps\.googleusercontent\.com$/;
+const INT_KEYS = new Set(["voiceSpeed", "autoHideMinutes", "deckPage", "maxRecordSeconds", "noSpeechSeconds", "smalltalkFollowSeconds",
   "followUpSeconds", "speakMaxSentences", "speakMaxChars", "imageSeconds", "idleFadeSeconds"]);
 const TOPICS = ["settings", "facts", "shortcuts", "konto", "timers", "history", "log", "usage"];
 const LOG_KINDS = new Set(["jarvis", "user", "tool", "system", "error", "draft"]);
@@ -166,7 +185,7 @@ let state = {
   history: { v: 1, updated: 0, messages: [], webSeen: false },
   log: [],
   usage: { day: "", input: 0, output: 0, requests: 0 },
-  meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0 },
+  meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0, setupDone: 0, setupHow: "" },
 };
 
 const listeners = new Map(TOPICS.map((t) => [t, new Set()]));
@@ -256,6 +275,7 @@ function coerceSetting(key, value, current) {
     if (key === "brainProvider") return PROVIDERS.has(s) ? s : current;
     if (key === "theme") return THEMES.has(s) ? s : current;
     if (key === "azureRegion") return REGIONS.has(s) ? s : current;
+    if (key === "googleClientId") return s === "" || GOOGLE_CLIENT_RX.test(s) ? s : current;
     return s.slice(0, STRING_MAX[key] ?? 200);
   }
   return current;
@@ -278,6 +298,12 @@ function sanitizeSettings(raw) {
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
       if (key === "v" || !(key in raw)) continue;
       out[key] = coerceSetting(key, raw[key], out[key]);
+    }
+    // Stand vor dem Satzende in drei Stufen: die alten Standardwerte (2,0 s / 2,8 s) wurden beim Speichern mit
+    // abgelegt; ohne unsureSeconds im Speicher waren es nie eigene Werte → die neuen Mac-Werte nehmen
+    if (!("unsureSeconds" in raw) && Number(raw.silenceSeconds) === 2 && Number(raw.hesitationSeconds) === 2.8) {
+      out.silenceSeconds = DEFAULT_SETTINGS.silenceSeconds;
+      out.hesitationSeconds = DEFAULT_SETTINGS.hesitationSeconds;
     }
   }
   freeVoice(out);
@@ -330,6 +356,7 @@ function loadTimers(raw) {
       ends,
       created: Number.isFinite(Number(t.created)) ? Number(t.created) : ends - 1,
       seconds: Number.isFinite(Number(t.seconds)) ? Number(t.seconds) : 0,
+      ...(t.reminder === true ? { reminder: true } : {}),
     });
   }
   return out.sort((a, b) => a.ends - b.ends).slice(-MAX.timers);
@@ -372,7 +399,8 @@ function loadUsage(raw) {
 function loadMeta(raw) {
   const m = isObj(raw) ? raw : {};
   return { installedAt: Number(m.installedAt) || 0, lastBoot: Number(m.lastBoot) || 0,
-    lastImportT: Number(m.lastImportT) || 0, migratedFromV1: Number(m.migratedFromV1) || 0 };
+    lastImportT: Number(m.lastImportT) || 0, migratedFromV1: Number(m.migratedFromV1) || 0,
+    setupDone: Number(m.setupDone) || 0, setupHow: m.setupHow === "skipped" ? "skipped" : m.setupDone ? "done" : "" };
 }
 
 /** §8.5 – v1 settings and timers of the first phone PWA, once. */
@@ -1043,14 +1071,16 @@ export function timers() {
  * @param {number} seconds clamped 1..86400
  * @param {string} label ≤ 30 chars
  * @param {number} [now]
+ * @param {{ reminder?: boolean }} [opts] reminder = Erinnerung zu einer Uhrzeit (Mitdenken)
  * @returns {Timer}
  */
-export function addTimer(seconds, label, now) {
+export function addTimer(seconds, label, now, { reminder = false } = {}) {
   ensure();
   const n = Number(seconds);
   const secs = Math.max(1, Math.min(Number.isFinite(n) ? Math.trunc(n) : 1, 24 * 3600));
   const created = nowMs(now);
   const t = { id: newId(), label: collapse(label).slice(0, 30), ends: created + secs * 1000, created, seconds: secs };
+  if (reminder) t.reminder = true; // Erinnerung (Mac 13.10. abends): klingelt als „Boss, Erinnerung: …“
   state.timers.push(t);
   if (state.timers.length > MAX.timers) {
     state.timers.sort((a, b) => a.created - b.created);
@@ -1244,11 +1274,7 @@ export function encodeSetup({ withKeys = true, includeFacts = true, includeShort
   ensure();
   const s = { ...state.settings };
   delete s.v;
-  if (!withKeys) {
-    delete s.anthropicKey;
-    delete s.geminiKey;
-    delete s.azureKey;
-  }
+  if (!withKeys) for (const k of KEY_FIELDS) delete s[k];
   const payload = { v: 1, t: Date.now(), s };
   if (includeFacts && state.facts.length) payload.f = state.facts.map((n) => n.text);
   if (includeShortcuts && state.shortcuts.length) payload.k = state.shortcuts.map((x) => ({ phrase: x.phrase, actions: clone(x.actions) }));
@@ -1286,7 +1312,7 @@ function pageBase() {
 
 // Schlüssel reisen nie in einem Link: der landet im Browser-Verlauf (mit Sync auch im Google-/Microsoft-Konto).
 // Für Schlüssel gibt es den Setup-Code zum Kopieren und Einfügen (security-privacy-3).
-const KEY_FIELDS = Object.freeze(["anthropicKey", "geminiKey", "azureKey"]);
+const KEY_FIELDS = Object.freeze(["anthropicKey", "geminiKey", "azureKey", "googleClientId"]);
 const CODE_HEAD = "JARVIS-SETUP:";
 
 /**
@@ -1420,6 +1446,42 @@ export function importFromLocation(loc = globalThis.location, hist = globalThis.
   return result;
 }
 
+// ---------------------------------------------------------------- Einrichtung und Google-Verbindung
+
+/** @returns {boolean} true, sobald „Jarvis einrichten“ einmal fertig war oder übersprungen wurde */
+export function setupDone() {
+  ensure();
+  return !!state.meta.setupDone;
+}
+
+/** @param {"done"|"skipped"} [how] */
+export function markSetupDone(how = "done") {
+  ensure();
+  state.meta.setupDone = Date.now();
+  state.meta.setupHow = how === "skipped" ? "skipped" : "done";
+  writeJSON(KEYS.meta, state.meta);
+}
+
+/** Was er bei Google erlaubt hat (kein Token): { calendar, mail, email, at } – damit Jarvis still erneuern darf. */
+export function googleLink() {
+  ensure();
+  const g = readJSON(KEYS.google, null);
+  if (!isObj(g)) return { calendar: false, mail: false, email: "", at: 0 };
+  return { calendar: !!g.calendar, mail: !!g.mail, email: String(g.email || "").slice(0, 120), at: Number(g.at) || 0 };
+}
+
+/** @param {{ calendar?: boolean, mail?: boolean, email?: string }|null} patch null = getrennt */
+export function setGoogleLink(patch) {
+  ensure();
+  if (patch === null) {
+    removeKey(KEYS.google);
+    return googleLink();
+  }
+  const g = { ...googleLink(), ...(isObj(patch) ? patch : {}), at: Date.now() };
+  writeJSON(KEYS.google, { calendar: !!g.calendar, mail: !!g.mail, email: String(g.email || "").slice(0, 120), at: g.at });
+  return googleLink();
+}
+
 // ---------------------------------------------------------------- wipe
 
 // Stimmen-Cache (voice.js, „jarvis-tts-…“): darin liegen gesprochene Sätze, auch persönliche („Dein Kontostand …“).
@@ -1455,8 +1517,9 @@ export function wipe(scope) {
       state = {
         settings: DEFAULT_SETTINGS, facts: [], shortcuts: [], konto: null, timers: [],
         history: { v: 1, updated: 0, messages: [], webSeen: false }, log: [], usage: { day: "", input: 0, output: 0, requests: 0 },
-        meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0 },
+        meta: { installedAt: 0, lastBoot: 0, lastImportT: 0, migratedFromV1: 0, setupDone: 0, setupHow: "" },
       };
+      try { globalThis.sessionStorage?.removeItem(SESSION_KEYS.googleToken); } catch { /* ignore */ }
       emit("settings", state.settings);
       emit("facts", []);
       emit("shortcuts", []);

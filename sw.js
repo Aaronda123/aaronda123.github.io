@@ -6,7 +6,8 @@
 // load then takes all its app files from the cache too (one version per load); the network answer still refreshes
 // the cache in the background. icons/, media/, vendor/, fonts/: cache-first; Range requests for media/ (Safari's video
 // loader) go to the network, offline a 206 is cut from the cached file. Everything else (Claude, Gemini, Azure,
-// markets, weather, Wikipedia): network only, never cached.
+// markets, weather, Wikipedia, Google sign-in accounts.google.com, Calendar www.googleapis.com, Gmail
+// gmail.googleapis.com, oauth2.googleapis.com): network only, never cached (other origins are not handled at all).
 // Only Jarvis' own files are handled (security-privacy-2): at the root of a GitHub-Pages address other pages of the
 // same origin (project pages /<repo>/…) stay untouched – no caching, no offline index.html for them – and activate
 // only deletes Jarvis' own old caches, never those of other apps on the same origin.
@@ -15,14 +16,15 @@
 // langsamem Netz nach 3 s – startet Jarvis aus dem Cache. Anfragen an Claude, Gemini, Azure, Kurse, Wetter und
 // Wikipedia gehen nie über den Cache.
 
-const VERSION = "jarvis-v2-202610131839";
+const VERSION = "jarvis-v2-202610140910";
 const SHELL_CACHE = `shell-${VERSION}`;
 const STATIC_CACHE = `static-${VERSION}`;
 const KEEP_PREFIXES = ["jarvis-tts"];          // Stimmen-Cache von voice.js bleibt über Updates erhalten
 
 const SHELL = [
   "./", "index.html", "style.css", "galaxy.js", "neuro.js", "model3d.js", "app.js", "hud.js", "ears.js", "voice.js",
-  "brain.js", "tools.js", "store.js", "intents.js", "sheets.js", "awake.js", "manifest.webmanifest",
+  "brain.js", "tools.js", "store.js", "intents.js", "mitdenken.js", "google.js", "sheets.js", "awake.js",
+  "manifest.webmanifest",
 ];
 const STATIC = [
   "vendor/anthropic.mjs", "media/awake.mp4",

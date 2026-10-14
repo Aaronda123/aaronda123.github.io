@@ -9,6 +9,14 @@
 // The setup sheet saves unsaved changes when it is closed (✕, Esc, Back, another sheet) and a successful „Testen“
 // stores the tested key at once (visual-ux-2). Setup-Links never carry keys (browser history); the keys move with the
 // Setup-Code (copy here, paste on the other device → the same „Einstellungen übernehmen?“ sheet, sec-priv-1/-3).
+// v4: "welcome" (#sheet-welcome, „Jarvis einrichten“): six steps (Mikrofon, Bildschirm wach, Stimme, Gehirn, Google,
+//     Fertig), one per screen, each skippable; every step button calls cb.onCommand("wz_mic" | "wz_awake" | "wz_voice" |
+//     "google_connect" | "brain_test") SYNCHRONOUSLY inside the tap (iOS grants mic/audio/wake lock/popup only there)
+//     and shows the returned { ok, text }. „Los geht's“ → onCommand("wz_finish", { background }); ✕/Esc/Back →
+//     onCommand("wz_closed"). From the wizard into the settings (Gehirn/Google) and back without losing the step.
+//     Settings section „Google verbinden“ (#sec-google): Client-ID field, Verbinden / Gmail erlauben / Trennen
+//     (onCommand "google_connect" { mail } / "google_disconnect" / "google_preload"), status from cb.status().google,
+//     the page origin for the OAuth client (#google-origin).
 // export function init(cb)        cb: { onSave(patch) → Promise, onCommand(cmd, detail) → any, onOpenChange(name|null),
 //                                       status() → { keyState, voiceState, micState, wakeState, standalone }, toast(text) }
 //                                 onCommand: "voice_test" {draft} · "history_clear" {} · "log_clear" {} ·
@@ -26,11 +34,14 @@
 import * as store from "./store.js";
 import { line } from "./intents.js";
 
-const SHEET_IDS = Object.freeze({ setup: "sheet-setup", help: "sheet-help", data: "sheet-data", import: "sheet-import" });
+const SHEET_IDS = Object.freeze({ setup: "sheet-setup", help: "sheet-help", data: "sheet-data", import: "sheet-import",
+  welcome: "sheet-welcome" });
 const NAMES = Object.keys(SHEET_IDS);
 const CLAUDE_KEY_RX = /^sk-ant-[A-Za-z0-9_-]{20,}$/;
 const GEMINI_KEY_RX = /^[A-Za-z0-9_-]{30,}$/;
 const PROVIDERS = new Set(["auto", "claude", "gemini"]);
+const GOOGLE_RX = /^[0-9]{5,}-[a-z0-9]{8,}\.apps\.googleusercontent\.com$/;
+const WZ_STEPS = Object.freeze(["mic", "awake", "voice", "brain", "google", "done"]);
 const FREE_PRESET = "geraet";
 
 // Einstellung → Feld (§3.3, §5.5); type: text | key | int | float | check | select
@@ -42,9 +53,15 @@ const FIELDS = Object.freeze([
   ["wakeWord", "f-wake", "check"], ["startInBackground", "f-background", "check"],
   ["listenOnOpen", "f-listen-open", "check"], ["greeting", "f-greeting", "check"],
   ["keepAwake", "f-keepawake", "check"], ["theme", "f-theme", "select"], ["autoHideMinutes", "f-autohide", "int"],
-  ["silenceSeconds", "f-silence", "float"], ["hesitationSeconds", "f-hesitation", "float"],
+  ["silenceSeconds", "f-silence", "float"], ["unsureSeconds", "f-unsure", "float"], ["hesitationSeconds", "f-hesitation", "float"],
   ["maxRecordSeconds", "f-maxrecord", "int"], ["speakMaxSentences", "f-sentences", "int"],
   ["imageSeconds", "f-imageseconds", "int"],
+  // Mitdenken und Plaudern (Mac 13.10. abends)
+  ["proactiveOffers", "f-offers", "check"], ["followUpAfterOffer", "f-fu-offer", "check"],
+  ["followUpAfterQuestion", "f-fu-question", "check"], ["followUpSmalltalk", "f-fu-chat", "check"],
+  ["smalltalkFollowSeconds", "f-chat-seconds", "int"],
+  // Google Kalender + Gmail (v4)
+  ["googleClientId", "f-google-client", "key"],
 ]);
 
 let cb = {};
@@ -57,6 +74,10 @@ let testing = false;
 let setupSnapshot = "";        // Formular beim Öffnen (ungespeicherte Änderungen erkennen)
 let importPayload = null;      // Setup-Link / Setup-Code, der auf „Übernehmen“ wartet
 let importSource = "link";     // "link" (#cfg= beim Öffnen) | "code" (eingefügter Setup-Code)
+let wzStep = 0;                // „Jarvis einrichten“: aktueller Schritt
+const wzOk = new Set();        // Schritte, deren Knopf geklappt hat
+let wzReturn = false;          // aus dem Assistenten in die Einstellungen: beim Schließen zurück zum Assistenten
+let wzEnding = false;          // „Los geht's“ schließt das Blatt (kein „übersprungen“)
 
 const $ = (id) => (typeof document !== "undefined" ? document.getElementById(id) : null);
 
@@ -219,6 +240,7 @@ function fillSetup() {
   updatePresetOptions();
   fillStatus();
   setupSnapshot = JSON.stringify(readSetup());
+  if (GOOGLE_RX.test(String(s.googleClientId || ""))) call("onCommand", "google_preload", {});
 }
 
 function setupDirty() {
@@ -235,6 +257,8 @@ function saveIfDirty() {
   let skipped = false;
   if (claude && !CLAUDE_KEY_RX.test(claude)) { delete patch.anthropicKey; skipped = true; }
   if (gemini && !GEMINI_KEY_RX.test(gemini)) { delete patch.geminiKey; skipped = true; }
+  const gid = String(patch.googleClientId ?? "").trim();
+  if (gid && !GOOGLE_RX.test(gid)) { delete patch.googleClientId; skipped = true; }
   setupSnapshot = JSON.stringify(readSetup());
   try {
     Promise.resolve(call("onSave", patch)).catch((e) => console.error("sheets: save", e));
@@ -284,6 +308,75 @@ function fillStatus() {
   // „Kurzbefehl-Link“ gibt es nur für die iOS-App „Kurzbefehle“ (CR3.1: keine iPhone-Knöpfe auf anderen Geräten)
   const sc = document.querySelector('#sheet-setup [data-cmd="copy_shortcut_link"]');
   if (sc) sc.hidden = device() !== "ios";
+  fillGoogle(st.google);
+}
+
+// ---------------------------------------------------------------- Google verbinden (v4)
+function googleIdFromForm() {
+  return String($("f-google-client")?.value ?? settingsNow().googleClientId ?? "").trim();
+}
+
+function fillGoogle(g) {
+  const origin = typeof location !== "undefined" ? location.origin : "";
+  setText($("google-origin"), origin);
+  const st = g || {};
+  const id = googleIdFromForm();
+  const chip = $("google-state");
+  const acc = $("google-account");
+  let chipText = "KEINE CLIENT-ID", accText = "Noch keine Client-ID eingetragen – die Anleitung steht unten.", cls = "";
+  if (id && !GOOGLE_RX.test(id)) {
+    chipText = "UNGÜLTIG";
+    accText = "Die Client-ID sieht nicht richtig aus. Sie endet auf „.apps.googleusercontent.com“.";
+    cls = "warn";
+  } else if (id) {
+    const parts = [st.calendar ? "Kalender ✓" : "", st.mail ? "Gmail ✓" : st.linked?.mail ? "" : "Gmail: fragt beim ersten Mal"]
+      .filter(Boolean).join(" · ");
+    if (st.connected) {
+      chipText = "VERBUNDEN";
+      accText = `Verbunden${st.email ? ` als ${st.email}` : ""}${parts ? ` · ${parts}` : ""}.`;
+      cls = "ok";
+    } else if (st.linked && (st.linked.calendar || st.linked.mail)) {
+      chipText = "ERNEUERN";
+      accText = `${st.email ? `${st.email}: ` : ""}Die Verbindung gilt eine Stunde. Jarvis erneuert sie still, sonst tipp auf „Verbinden“.`;
+      cls = "warn";
+    } else {
+      chipText = "NICHT VERBUNDEN";
+      accText = "Client-ID gespeichert. Tipp auf „Verbinden“ und melde dich bei Google an.";
+    }
+  }
+  setText(chip, chipText);
+  chip?.classList.toggle("warn", cls === "warn");
+  if (acc) {
+    setText(acc, accText);
+    acc.classList.toggle("ok", cls === "ok");
+    acc.classList.toggle("warn", cls === "warn");
+  }
+}
+
+/** „Verbinden“ / „Gmail erlauben“: Client-ID aus dem Feld zuerst speichern, dann synchron im Tippen verbinden. */
+function googleConnect(mail) {
+  const id = googleIdFromForm();
+  if (!id) {
+    toast("Trag zuerst deine Client-ID ein.");
+    const d = $("google-howto");
+    if (d) d.open = true;
+    try { $("f-google-client")?.focus(); } catch { /* ignore */ }
+    return null;
+  }
+  if (!GOOGLE_RX.test(id)) {
+    toast("Die Client-ID sieht nicht richtig aus. Sie endet auf „.apps.googleusercontent.com“.");
+    return null;
+  }
+  if (id !== String(settingsNow().googleClientId || "")) {
+    call("onSave", { googleClientId: id });
+    setupSnapshot = JSON.stringify(readSetup());
+  }
+  const p = call("onCommand", "google_connect", { mail: !!mail });
+  Promise.resolve(p).then((res) => {
+    if (res?.text) toast(res.text);
+    refresh();
+  }, () => refresh());
+  return p;
 }
 
 // ---------------------------------------------------------------- Hilfe (§5.4, CR3.4)
@@ -584,6 +677,62 @@ function command(cmd, btn) {
     case "open_setup":
       open("setup");
       return true;
+    case "open_welcome":
+      open("welcome", { step: 0 });
+      return true;
+    case "google_connect":
+      googleConnect(false);
+      return true;
+    case "google_mail":
+      googleConnect(true);
+      return true;
+    case "google_disconnect":
+      if (!confirmed("Google trennen? Jarvis vergisst die Verbindung zu Kalender und Gmail auf diesem Gerät.")) return true;
+      call("onCommand", "google_disconnect", {});
+      toast("Google getrennt.");
+      refresh();
+      return true;
+    case "wz_next":
+      wzGo(wzStep + 1);
+      return true;
+    case "wz_back":
+      wzGo(wzStep - 1);
+      return true;
+    case "wz_mic": case "wz_awake": case "wz_voice":
+      wzRun(cmd.slice(3), call("onCommand", cmd, {}));
+      return true;
+    case "wz_brain":
+      wzBrain();
+      return true;
+    case "wz_brain_more":
+      wzReturn = true;
+      open("setup", { section: "brain" });
+      return true;
+    case "wz_google":
+      if (!GOOGLE_RX.test(String(settingsNow().googleClientId || ""))) {
+        wzReturn = true;
+        open("setup", { section: "google" });
+        const d = $("google-howto");
+        if (d) d.open = true;
+        return true;
+      }
+      wzRun("google", call("onCommand", "google_connect", { mail: false }));
+      return true;
+    case "wz_google_more": {
+      wzReturn = true;
+      open("setup", { section: "google" });
+      const d = $("google-howto");
+      if (d) d.open = true;
+      return true;
+    }
+    case "wz_finish": {
+      const bg = !!$("wz-background")?.checked;
+      wzEnding = true;
+      close("welcome");
+      wzEnding = false;
+      call("onCommand", "wz_finish", { background: bg });
+      return true;
+    }
     case "konto_import": {
       const raw = String($("data-konto")?.value ?? "").trim();
       if (!raw) {
@@ -674,6 +823,12 @@ async function onSubmit(e) {
     open("setup", { section: "brain" });
     return;
   }
+  const gid = String($("f-google-client")?.value ?? "").trim();
+  if (gid && !GOOGLE_RX.test(gid)) {
+    toast("Die Google-Client-ID sieht nicht richtig aus. Sie endet auf „.apps.googleusercontent.com“.");
+    open("setup", { section: "google" });
+    return;
+  }
   saving = true;
   try {
     const patch = readSetup();
@@ -718,6 +873,11 @@ function onClick(e) {
 function onInput(e) {
   const id = e.target?.id || "";
   if (id === "f-azure") updatePresetOptions();
+  if (id === "f-google-client") {
+    const v = String(e.target.value || "").trim();
+    if (GOOGLE_RX.test(v)) call("onCommand", "google_preload", { clientId: v });   // Skript laden, bevor er tippt
+    fillGoogle((call("status") || {}).google);
+  }
   if (id === "f-anthropic" || id === "f-azure" || /gemini/i.test(id) || e.target?.type === "radio"
     || (e.target?.tagName === "SELECT" && [...e.target.options].some((o) => o.value === "gemini"))) {
     setText($("key-state"), keyStateFromForm());
@@ -729,6 +889,104 @@ function onKey(e) {
   if (e.key !== "Escape" || !current) return;
   e.preventDefault();
   close(current);
+}
+
+// ---------------------------------------------------------------- „Jarvis einrichten“ (v4)
+function wzStatus(step, text, cls = "") {
+  const box = document.querySelector(`#${SHEET_IDS.welcome} [data-status="${step}"]`);
+  if (!box) return;
+  setText(box, String(text || ""));
+  box.classList.toggle("ok", cls === "ok");
+  box.classList.toggle("warn", cls === "warn");
+}
+
+function fillWelcome() {
+  const root = $(SHEET_IDS.welcome);
+  if (!root) return;
+  const step = WZ_STEPS[wzStep];
+  for (const sec of root.querySelectorAll(".wz-step")) sec.hidden = sec.dataset.step !== step;
+  setText($("wz-count"), `${wzStep + 1} / ${WZ_STEPS.length}`);
+  const dots = [...root.querySelectorAll("#wz-dots i")];
+  dots.forEach((d, i) => {
+    d.classList.toggle("on", i === wzStep);
+    d.classList.toggle("done", i < wzStep || wzOk.has(WZ_STEPS[i]));
+  });
+  const back = $("wz-back");
+  if (back) back.hidden = wzStep === 0;
+  const next = $("wz-next");
+  if (next) {
+    next.hidden = step === "done";
+    const ok = wzOk.has(step);
+    setText(next, ok ? "Weiter" : "Überspringen");
+    next.classList.toggle("go", ok);
+  }
+  if (step === "brain") {
+    const f = $("wz-gemini");
+    if (f && !f.value) f.value = String(settingsNow().geminiKey || "");
+    const st = call("status") || {};
+    if (!wzOk.has("brain") && st.provider && st.provider !== "none") {   // in den Einstellungen eingetragen
+      wzOk.add("brain");
+      wzStatus("brain", "Gehirn eingetragen ✓", "ok");
+      fillWelcome();
+      return;
+    }
+  }
+  if (step === "google" && !wzOk.has("google")) {
+    const st = (call("status") || {}).google || {};
+    if (st.connected) {
+      wzOk.add("google");
+      wzStatus("google", "Google ist verbunden ✓", "ok");
+      fillWelcome();
+      return;
+    }
+    if (!GOOGLE_RX.test(String(settingsNow().googleClientId || ""))) {
+      wzStatus("google", "Noch keine Client-ID: „Google verbinden“ führt dich durch die Anleitung. Du kannst das auch später machen.");
+    } else {
+      call("onCommand", "google_preload", {});
+    }
+  }
+  const body = root.querySelector(".sheet-body");
+  if (body) body.scrollTop = 0;
+}
+
+function wzGo(i) {
+  wzStep = Math.max(0, Math.min(WZ_STEPS.length - 1, i));
+  fillWelcome();
+}
+
+function wzRun(step, p) {
+  wzStatus(step, "…");
+  Promise.resolve(p).then((res) => {
+    const ok = !!res?.ok;
+    if (ok) wzOk.add(step);
+    wzStatus(step, String(res?.text || (ok ? "Erledigt ✓" : "Das hat nicht geklappt.")), ok ? "ok" : "warn");
+    if (WZ_STEPS[wzStep] === step) fillWelcome();
+  }, () => wzStatus(step, "Das hat nicht geklappt.", "warn"));
+}
+
+function wzBrain() {
+  const key = String($("wz-gemini")?.value ?? "").trim();
+  if (!key) {
+    wzStatus("brain", "Ohne Schlüssel geht es auch – eintragen kannst du ihn jederzeit unter ⚙ Einstellungen.");
+    return;
+  }
+  if (!GEMINI_KEY_RX.test(key)) {
+    wzStatus("brain", "Der Schlüssel sieht nicht richtig aus. Er beginnt meist mit „AIza“.", "warn");
+    return;
+  }
+  const s = settingsNow();
+  const draft = { brainProvider: s.brainProvider || "auto", geminiKey: key, anthropicKey: String(s.anthropicKey || "") };
+  wzStatus("brain", "Teste …");
+  Promise.resolve(call("onCommand", "brain_test", { draft })).then(async (res) => {
+    if (res?.ok) {
+      try { await Promise.resolve(call("onSave", { geminiKey: key })); } catch (e) { console.error("sheets: save", e); }
+      wzOk.add("brain");
+      wzStatus("brain", "Gehirn verbunden ✓", "ok");
+    } else {
+      wzStatus("brain", String(res?.text || line("err.other")), "warn");
+    }
+    if (WZ_STEPS[wzStep] === "brain") fillWelcome();
+  }, () => wzStatus("brain", line("err.other"), "warn"));
 }
 
 // ---------------------------------------------------------------- öffentliche Schnittstelle
@@ -756,8 +1014,13 @@ export function init(callbacks = {}) {
  * @param {"setup"|"help"|"data"} name
  * @param {{ section?: string }} [opts]
  */
-export function open(name, { section, payload, source } = {}) {
+export function open(name, { section, payload, source, step } = {}) {
   if (!SHEET_IDS[name]) return;
+  if (name === "welcome" && Number.isInteger(step)) {
+    wzStep = Math.max(0, Math.min(WZ_STEPS.length - 1, step));
+    if (step === 0) wzOk.clear();
+  }
+  if (name !== "setup" && name !== "welcome") wzReturn = false;
   if (name !== "setup") saveIfDirty();          // aus den Einstellungen in „Hey Jarvis einrichten“: nichts verlieren
   for (const n of NAMES) {
     if (n !== name) {
@@ -774,7 +1037,8 @@ export function open(name, { section, payload, source } = {}) {
       if (payload) importSource = source === "code" ? "code" : "link";
       importPayload = payload || importPayload;
       fillImport(importPayload, importSource);
-    } else fillData();
+    } else if (name === "welcome") fillWelcome();
+    else fillData();
   } catch (e) {
     console.error("sheets: fill", e);
   }
@@ -803,6 +1067,9 @@ export function close(name) {
     toast("Nicht übernommen.");
     call("onCommand", "import_done", { accepted: false });
   }
+  const welcomeWasOpen = list.includes("welcome") && isOpen("welcome");
+  const backToWizard = wzReturn && list.includes("setup") && isOpen("setup") && !list.includes("welcome");
+  const leftWizard = wzReturn && !name && isOpen("setup");      // Zurück-Taste in den Einstellungen des Assistenten
   let changed = false;
   for (const n of list) {
     const s = $(SHEET_IDS[n]);
@@ -813,7 +1080,14 @@ export function close(name) {
   }
   if (current && !isOpen(current)) current = null;
   if (!current) current = NAMES.find((n) => isOpen(n)) || null;
+  if (backToWizard) {                                   // Gehirn/Google eingetragen: weiter im Assistenten
+    wzReturn = false;
+    open("welcome");
+    return;
+  }
+  if (!name) wzReturn = false;
   if (changed) call("onOpenChange", current);
+  if ((welcomeWasOpen || leftWizard) && !wzEnding) call("onCommand", "wz_closed", {});
 }
 
 /**

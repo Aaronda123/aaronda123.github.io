@@ -1,7 +1,7 @@
 // ==============================================================================================================
 // CONTRACT – ears.js (owner: builder AUDIO). Spec: ARCHITECTURE.md §3.2.5, §3.5.1, §7.3.
 // Imports: intents.js only. Settings and the AudioContext are injected via init(deps).
-// export const TIMINGS   { silenceMs 2000, hesitationMs 2800, closeTailMs 1000, closeHoldMs 1800, closeMaxMs 5000,
+// export const TIMINGS   { silenceMs 900, unsureMs 1500, hesitationMs 2000, closeTailMs 1000, closeHoldMs 1800, closeMaxMs 5000,
 //                          prehideStableMs 250, maxMs 50000, noSpeechMs 6000, followUpMs 4000, bareNameMs 1300,
 //                          tickMs 80, stopGraceMs 400, restartBackoffMs [250 … 8000] }
 // export function init(handlers, deps)
@@ -14,7 +14,8 @@
 // export function wakeState(): "off"|"starting"|"on"|"paused"|"blocked"|"unsupported"|"error"
 // export async function startWake(): Promise<WakeState>;  export function pauseWake(); resumeWake(); stopWake()
 // export function unlockInGesture(): Promise<boolean>     (call synchronously inside a tap handler)
-// export function listen({ followUp }?): { promise: Promise<ListenResult>, finish(), cancel() }
+// export function listen({ followUp, seconds }?): { promise: Promise<ListenResult>, finish(), cancel() }
+//   seconds: eigene Wartezeit fürs Nachhören (Plaudern: 6 s statt followUpMs)
 // export function isListening(): boolean;  export function cancel()
 // export function blockReason(): "mic"|"service"|null   why native recognition is refused (service = Siri/Diktat aus)
 // export function micPermission(): "granted"|"denied"|"prompt"|null   Permissions API state of the microphone (cached)
@@ -26,14 +27,16 @@
 // Jarvis' Ohren. Erste Wahl ist die Spracherkennung von iOS (live mitlesbar, Weckwort im selben Durchgang).
 // Ist sie gesperrt, nimmt Jarvis selbst auf (echte Pegel treiben die Kugel) und schickt die Aufnahme an
 // Azure Speech, sofern ein Azure-Schlüssel eingetragen ist. Sonst bleibt die Tastatur.
-// Satzende wie am Mac (Listener._record): Zögern 2,8 s → Schließen-Befehl 1,0 s → Stille 2,0 s.
+// Satzende wie am Mac seit 13.10. abends (Listener._record + speech_end_kind): bricht der Satz mittendrin ab („… und“,
+// „äh“, „dass ich“) → 2,0 s; Schließen-Befehl → 1,0 s; klingt er unsicher (Artikel am Ende, ein Wort) → 1,5 s; klingt er
+// fertig → 0,9 s. (Die Vorab-Erkennung des Mac entfällt: die Spracherkennung des Geräts erkennt schon live mit.)
 // Android: Chrome beendet jede Erkennung nach ein paar Sekunden Stille und piept bei jedem Start. Darum wartet
 // Jarvis dort zwischen zwei Durchgängen mit einem eigenen, lautlosen Mikrofon-Pegel auf Stimme und startet die
 // Erkennung erst dann (sonst piept das Handy auf dem Nachttisch alle paar Sekunden).
-import { matchWake, norm, isHesitant, endsWithHide } from "./intents.js";
+import { matchWake, norm, speechEndKind, endsWithHide } from "./intents.js";
 
 export const TIMINGS = Object.freeze({
-  silenceMs: 2000, hesitationMs: 2800, closeTailMs: 1000, closeHoldMs: 1800, closeMaxMs: 5000,
+  silenceMs: 900, unsureMs: 1500, hesitationMs: 2000, closeTailMs: 1000, closeHoldMs: 1800, closeMaxMs: 5000,
   prehideStableMs: 250, maxMs: 50000, noSpeechMs: 6000, followUpMs: 4000, bareNameMs: 1300,
   tickMs: 80, stopGraceMs: 400, restartBackoffMs: Object.freeze([250, 500, 1000, 2000, 4000, 8000]),
 });
@@ -66,7 +69,7 @@ const ANDROID_RETRY_MS = 3000;      // Android ohne Pegel-Wächter: längere Pau
 const ANDROID_RETRY_MAX_MS = 30000; // … wird verdoppelt, solange der Wächter nicht laufen kann (Ton gesperrt, robustness-13)
 const LEAD_SEP = /^[\s,.!?:;-]+/u;
 const STT_ALIAS = Object.freeze({
-  silenceSeconds: "silenceMs", hesitationSeconds: "hesitationMs", maxRecordSeconds: "maxMs",
+  silenceSeconds: "silenceMs", unsureSeconds: "unsureMs", hesitationSeconds: "hesitationMs", maxRecordSeconds: "maxMs",
   noSpeechSeconds: "noSpeechMs", followUpSeconds: "followUpMs",
 });
 
@@ -157,6 +160,10 @@ function safeNorm(text) {
 
 function test(fn, text) {
   try { return !!fn(text); } catch { return false; }
+}
+
+function safeKind(text) {
+  try { return speechEndKind(text); } catch { return "unsicher"; }
 }
 
 function safeMatchWake(text) {
@@ -509,7 +516,7 @@ export function unlockInGesture() {
   });
 }
 
-export function listen({ followUp = false } = {}) {
+export function listen({ followUp = false, seconds = 0 } = {}) {
   wakeToken++;
   stopGate();
   clearTimeout(restartTimer);
@@ -517,6 +524,7 @@ export function listen({ followUp = false } = {}) {
   const eng = engine();
   reportEngine();
   const c = newCommand({ followUp, fromWake: false });
+  if (followUp && Number(seconds) > 0) c.followMs = Math.min(30000, Number(seconds) * 1000);
   if (wantWake && (wState === "on" || wState === "starting" || wState === "error")) setWakeState("paused");
   if (eng === "native") {
     startLevelSim(c);
@@ -862,7 +870,8 @@ function newCommand({ followUp = false, fromWake = false, hit = null } = {}) {
   const c = {
     id: ++cmdSeq, followUp: !!followUp, fromWake, hit, wakeAt: fromWake ? now : 0, startAt: now,
     engine: "native", session: null, base: 0, offset: 0, anchorNorm: null, anchorWords: 0, restarts: 0,
-    liveText: "", lastNorm: "", lastChangeAt: now, voiced: false, hesitant: false, close: false,
+    liveText: "", lastNorm: "", lastChangeAt: now, voiced: false, hesitant: false, kind: "unsicher", close: false,
+    followMs: 0,
     prehidden: false, hidAt: 0, boost: 0.15, done: false, tick: null, levelTimer: null, az: null,
     resolve: null, promise: null, listening: null,
   };
@@ -935,7 +944,8 @@ function commandResult(c, t) {
     c.lastNorm = n;
     c.lastChangeAt = Date.now();
     c.voiced = n !== "";
-    c.hesitant = c.voiced && test(isHesitant, live);
+    c.kind = c.voiced ? (safeKind(live) || "unsicher") : "unsicher";   // offen | unsicher | fertig
+    c.hesitant = c.kind === "offen";
     c.close = c.voiced && test(endsWithHide, n);
   }
   if (live !== c.liveText) {
@@ -956,9 +966,12 @@ function tickCommand(c) {
     if (c.done) return;
   }
   if (c.voiced) {
-    const pause = c.hesitant ? T.hesitationMs : c.close ? T.closeTailMs : T.silenceMs;
+    const unsure = Math.max(T.silenceMs, T.unsureMs);
+    const pause = c.kind === "offen" ? Math.max(unsure, T.hesitationMs)   // „spiel … äh …“: warten
+      : c.close ? T.closeTailMs                                          // Schließen-Befehl: nur kurz auf einen Nachsatz
+        : c.kind === "unsicher" ? unsure : T.silenceMs;
     if (now - c.lastChangeAt >= pause) {
-      endCommand(c, c.hesitant ? "hesitation" : c.close ? "close" : "silence");
+      endCommand(c, c.kind === "offen" ? "hesitation" : c.close ? "close" : c.kind === "unsicher" ? "unsure" : "silence");
       return;
     }
   }
@@ -966,7 +979,7 @@ function tickCommand(c) {
   if (c.prehidden && now - c.hidAt >= T.closeMaxMs) { endCommand(c, "close_max"); return; }
   if (now - c.startAt >= T.maxMs) { endCommand(c, "max"); return; }
   if (c.fromWake && !c.voiced && now - c.wakeAt >= T.bareNameMs) { endCommand(c, "bare"); return; }
-  if (!c.voiced && now - c.startAt >= (c.followUp ? T.followUpMs : T.noSpeechMs)) endCommand(c, "nospeech");
+  if (!c.voiced && now - c.startAt >= (c.followUp ? c.followMs || T.followUpMs : T.noSpeechMs)) endCommand(c, "nospeech");
 }
 
 function commandSessionEnded(s) {
@@ -990,7 +1003,7 @@ function commandSessionEnded(s) {
     endCommand(c, "error", { error: { code: "unavailable", message: "Deutsch wird nicht erkannt" } });
     return;
   }
-  const limit = c.followUp ? T.followUpMs : T.noSpeechMs;
+  const limit = c.followUp ? c.followMs || T.followUpMs : T.noSpeechMs;
   if (c.restarts < 1 && Date.now() - c.startAt < limit && isVisible()) {
     c.restarts++;
     c.anchorNorm = null;                                 // the new recognizer starts with an empty transcript
@@ -1164,9 +1177,10 @@ function tickAzure(c) {
     if (now - c.startAt >= T.maxMs) endCommand(c, "nospeech");
     return;
   }
-  if (az.voiced && now - az.lastLoudAt >= T.silenceMs) { azureStop(c, "silence"); return; }
+  // ohne Live-Text gilt der Satz als „unsicher“ (Mac: ohne Vosk) → unsure_seconds
+  if (az.voiced && now - az.lastLoudAt >= Math.max(T.silenceMs, T.unsureMs)) { azureStop(c, "silence"); return; }
   if (now - az.startAt >= T.maxMs) { azureStop(c, "max"); return; }
-  if (!az.voiced && now - az.startAt >= (c.followUp ? T.followUpMs : T.noSpeechMs)) azureStop(c, "nospeech");
+  if (!az.voiced && now - az.startAt >= (c.followUp ? c.followMs || T.followUpMs : T.noSpeechMs)) azureStop(c, "nospeech");
 }
 
 function azureTeardown(c) {

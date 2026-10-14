@@ -1,11 +1,12 @@
 <!doctype html>
 <!-- J.A.R.V.I.S. fürs iPhone – statisches DOM (ARCHITECTURE.md §3.3, Texte §5, Ebenen §9.3, Kopf §9.10).
      Hintergrund, Rahmen, Kopfzeile, Bühne mit dem Neuronen-Ball, Bild- und 3D-Box, Eingabezeile, sechs Panels zum
-     Wischen, Laufband; darüber Blätter (Einstellungen, „Hey Jarvis“, Daten), Schleier, Freischalten, Start, Hinweis. -->
+     Wischen, Laufband; darüber Blätter („Jarvis einrichten“, Einstellungen, „Hey Jarvis“, Daten), Schleier,
+     Freischalten, Start, Hinweis. Google (Kalender/Gmail) lädt accounts.google.com/gsi/client erst bei Bedarf. -->
 <html lang="de" data-theme="mac">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https://upload.wikimedia.org; media-src 'self' blob: data:; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://*.tts.speech.microsoft.com https://*.stt.speech.microsoft.com https://api.binance.com https://api.coingecko.com https://api.frankfurter.app https://geocoding-api.open-meteo.com https://api.open-meteo.com https://de.wikipedia.org https://en.wikipedia.org; worker-src 'self'; manifest-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; font-src 'self'; img-src 'self' data: blob: https://upload.wikimedia.org; media-src 'self' blob: data:; frame-src https://accounts.google.com; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://www.googleapis.com https://gmail.googleapis.com https://oauth2.googleapis.com https://accounts.google.com/gsi/ https://*.tts.speech.microsoft.com https://*.stt.speech.microsoft.com https://api.binance.com https://api.coingecko.com https://api.frankfurter.app https://geocoding-api.open-meteo.com https://api.open-meteo.com https://de.wikipedia.org https://en.wikipedia.org; worker-src 'self'; manifest-src 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>JARVIS</title>
 <meta name="description" content="J.A.R.V.I.S. – persönlicher Sprachassistent">
@@ -30,9 +31,10 @@
   <!-- ===== Kosmischer Hintergrund (Milchstraße), liegt hinter allem ===== -->
   <div id="galaxy" aria-hidden="true"><canvas id="gx-stars"></canvas><canvas id="gx-live"></canvas></div>
 
-  <!-- ===== Rahmen: Ecken, Gitter ===== -->
+  <!-- ===== Rahmen: Ecken, Hauch Milchstraße (heller, wenn das Gehirn aufgezogen ist), Gitter ===== -->
   <div class="frame" aria-hidden="true">
     <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+    <div class="milkyway"></div>
     <div class="grid"></div>
   </div>
 
@@ -48,12 +50,14 @@
 
     <!-- ===== Mitte: Sprachkugel (Neuronen-Ball), Bild, 3D-Modell ===== -->
     <main class="stage-wrap" id="stage-wrap">
-      <button class="stage" id="stage" type="button" aria-label="Kugel: antippen zum Zuhören, Fertig oder Stopp">
-        <canvas id="orb" width="600" height="600"></canvas>
+      <button class="stage" id="stage" type="button" aria-label="Gehirn: antippen zum Zuhören, Fertig oder Stopp; ziehen zieht es zur Milchstraße auf, zweimal tippen holt die Ursprungsform zurück">
+        <canvas id="orb" width="900" height="900"></canvas>
         <span class="state-label" id="state-label">BOOT</span>
       </button>
       <!-- „Zeig mir ein Bild von …“ -->
       <div id="imgview" aria-hidden="true"><img id="imgview-img" alt=""><span id="imgview-cap"></span></div>
+      <!-- „Zeig mir kurz … aus Wikipedia“: nur Text, ohne Fläche, über der Kugel -->
+      <div id="textcard" aria-live="polite" aria-hidden="true"><b id="textcard-title"></b><div id="textcard-body"></div><small id="textcard-src"></small></div>
       <!-- „Zeig mir ein 3D-Modell von …“: deckt die Bühne ab, mit dem Finger drehbar -->
       <div id="model3d" aria-hidden="true">
         <canvas id="model3d-canvas"></canvas>
@@ -167,6 +171,70 @@
     <div class="ticker" aria-hidden="true"><div class="ticker-track" id="ticker"><span class="tk">KURSE WERDEN GELADEN …</span></div></div>
   </div>
 
+  <!-- ===== Blatt: „Jarvis einrichten“ (erster Besuch; jeder Schritt per Tippen, jeder überspringbar) ===== -->
+  <section class="sheet welcome" id="sheet-welcome" hidden aria-label="Jarvis einrichten">
+    <div class="sheet-head"><span class="tag">◈ JARVIS EINRICHTEN</span><span class="tag dim" id="wz-count">1 / 6</span><button type="button" class="close" data-close="welcome" aria-label="Später einrichten">✕</button></div>
+    <div class="sheet-body">
+      <div class="wz-dots" id="wz-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
+      <section class="panel wz-step" data-step="mic">
+        <h3>1. Mikrofon erlauben</h3>
+        <p>Damit ich „Jarvis“ oder „Hey Jarvis“ höre, braucht dein Browser einmal deine Erlaubnis für das Mikrofon (auf dem iPhone auch für die Spracherkennung). Tipp auf den Knopf und dann auf „Erlauben“.</p>
+        <button type="button" class="primary" data-cmd="wz_mic">🎤 Mikrofon erlauben</button>
+        <p class="hint wz-status" data-status="mic" role="status"></p>
+      </section>
+
+      <section class="panel wz-step" data-step="awake" hidden>
+        <h3>2. Bildschirm wach halten</h3>
+        <p>Solange ich lausche, bleibt der Bildschirm an – sonst sperrt sich das Gerät und ich höre nichts mehr. Am besten hängt es am Ladekabel. Im Hintergrund-Modus ist der Bildschirm schwarz.</p>
+        <button type="button" class="primary" data-cmd="wz_awake">☀ Bildschirm wach halten</button>
+        <p class="hint wz-status" data-status="awake" role="status"></p>
+      </section>
+
+      <section class="panel wz-step" data-step="voice" hidden>
+        <h3>3. Stimme testen</h3>
+        <p>Ich spreche kostenlos mit der besten deutschen Stimme deines Geräts. Tipp auf den Knopf – hörst du mich?</p>
+        <button type="button" class="primary" data-cmd="wz_voice">♪ Stimme testen</button>
+        <p class="hint wz-status" data-status="voice" role="status"></p>
+      </section>
+
+      <section class="panel wz-step" data-step="brain" hidden>
+        <h3>4. Gehirn (optional)</h3>
+        <p>Uhrzeit, Timer, Wetter, Bilder, Links und „merk dir …“ gehen ohne Schlüssel. Zum Mitdenken trag einen kostenlosen Gemini-Schlüssel ein: aistudio.google.com/apikey öffnen, „API-Schlüssel erstellen“, hier einfügen.</p>
+        <label for="wz-gemini">Gemini-Schlüssel (kostenlos)</label>
+        <input id="wz-gemini" type="password" placeholder="AIza…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <div class="btnrow">
+          <button type="button" class="primary" data-cmd="wz_brain">Speichern und testen</button>
+          <button type="button" data-cmd="wz_brain_more">Claude oder mehr: Einstellungen</button>
+        </div>
+        <p class="hint wz-status" data-status="brain" role="status"></p>
+      </section>
+
+      <section class="panel wz-step" data-step="google" hidden>
+        <h3>5. Google verbinden (optional)</h3>
+        <p>Kalender und Gmail: Ich lese Termine und Mails vor, trage Termine ein und schreibe Mails – eintragen und senden nur nach deinem „ja“. Dafür brauchst du einmal eine eigene, kostenlose Client-ID; die Anleitung Schritt für Schritt steht in den Einstellungen.</p>
+        <div class="btnrow">
+          <button type="button" class="primary" data-cmd="wz_google">Google verbinden</button>
+          <button type="button" data-cmd="wz_google_more">Anleitung und Client-ID</button>
+        </div>
+        <p class="hint wz-status" data-status="google" role="status"></p>
+      </section>
+
+      <section class="panel wz-step" data-step="done" hidden>
+        <h3>6. Fertig – ich lausche jetzt still im Hintergrund.</h3>
+        <p>Der Bildschirm wird schwarz, und „Jarvis“ oder „Hey Jarvis“ holt mich zurück. Zweimal tippen auf den schwarzen Bildschirm zeigt mich auch.</p>
+        <label class="check"><input id="wz-background" type="checkbox" checked> Bei jedem Start still im Hintergrund lauschen</label>
+        <p class="note">Ehrlich: Eine Webseite hört nur zu, solange sie offen ist und der Bildschirm an bleibt. Ist das Gerät gesperrt oder Jarvis geschlossen, hört keine Webseite zu – auf dem iPhone öffnet dann ein Sprachkurzbefehl Jarvis auf „Hey Jarvis“ (Anleitung unter ⚙ → „Hey Jarvis“ einrichten). Nach einem Neustart kann der Browser einmal ein Tippen verlangen.</p>
+        <button type="button" class="primary wz-go" data-cmd="wz_finish">Los geht's</button>
+      </section>
+
+      <div class="btnrow wz-nav">
+        <button type="button" data-cmd="wz_back" id="wz-back">Zurück</button>
+        <button type="button" data-cmd="wz_next" id="wz-next">Überspringen</button>
+      </div>
+    </div>
+  </section>
+
   <!-- ===== Blatt: Einstellungen ===== -->
   <section class="sheet" id="sheet-setup" hidden aria-label="Einstellungen">
     <div class="sheet-head"><span class="tag">⚙ EINSTELLUNGEN</span><button type="button" class="close" data-close="setup" aria-label="Schließen">✕</button></div>
@@ -188,6 +256,33 @@
         <input id="f-anthropic" type="password" placeholder="sk-ant-…" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
         <p class="hint">console.anthropic.com → API Keys. Abrechnung pro Gespräch, meist ein paar Cent. Beste Qualität, wie am Mac. Mit jeder Frage gehen Gedächtnis, Notizen, Termine und Konto an Claude mit.</p>
         <button type="button" data-cmd="brain_test">Testen</button>
+      </section>
+
+      <section class="panel" id="sec-google">
+        <header><span class="tag">GOOGLE VERBINDEN</span><span class="tag dim chip" id="google-state">—</span></header>
+        <p class="hint first">Kalender und Gmail über dein eigenes Google-Konto: Jarvis liest Termine und Mails vor, trägt Termine ein und schreibt Mails – eintragen, speichern und senden aber nur nach deinem „ja“. Die Anmeldung läuft direkt zwischen diesem Browser und Google, ohne fremden Server. Der Zugriffsschlüssel von Google gilt eine Stunde und bleibt nur in diesem Fenster.</p>
+        <label for="f-google-client">OAuth-Client-ID (eigene, kostenlos)</label>
+        <input id="f-google-client" type="text" placeholder="…apps.googleusercontent.com" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" inputmode="url">
+        <p class="hint" id="google-account">Nicht verbunden.</p>
+        <div class="btnrow">
+          <button type="button" data-cmd="google_connect">Verbinden</button>
+          <button type="button" data-cmd="google_mail">Gmail erlauben</button>
+          <button type="button" data-cmd="google_disconnect">Trennen</button>
+        </div>
+        <details class="sub" id="google-howto">
+        <summary>Anleitung: eigene Client-ID anlegen (einmalig, kostenlos)</summary>
+        <ol class="steps">
+          <li>Öffne <b>console.cloud.google.com</b> und melde dich mit deinem Google-Konto an.</li>
+          <li>Oben auf die Projektauswahl tippen → „Neues Projekt“ → Name z. B. „Jarvis“ → „Erstellen“.</li>
+          <li>Menü → „APIs &amp; Dienste“ → „Bibliothek“: „Google Calendar API“ suchen → „Aktivieren“. Danach „Gmail API“ suchen → „Aktivieren“.</li>
+          <li>„APIs &amp; Dienste“ → „OAuth-Zustimmungsbildschirm“ (heißt teils „Google Auth Platform“): Nutzertyp „Extern“, App-Name „Jarvis“, deine eigene E-Mail als Support- und Kontaktadresse → speichern. Unter „Zielgruppe“ bzw. „Testnutzer“ deine eigene E-Mail-Adresse als Testnutzer eintragen.</li>
+          <li>„APIs &amp; Dienste“ → „Anmeldedaten“ → „Anmeldedaten erstellen“ → „OAuth-Client-ID“ → Anwendungstyp „Webanwendung“, Name „Jarvis“.</li>
+          <li>Unter „Autorisierte JavaScript-Quellen“ → „URI hinzufügen“ → genau diese Adresse eintragen: <code id="google-origin">die Adresse dieser Seite</code> (ohne Schrägstrich am Ende). Weiterleitungs-URIs brauchst du nicht. → „Erstellen“.</li>
+          <li>Die Client-ID (endet auf „.apps.googleusercontent.com“) kopieren, hier oben einfügen und „Verbinden“ tippen.</li>
+        </ol>
+        <p class="hint">Beim ersten Verbinden zeigt Google „Google hat diese App nicht überprüft“. Das ist bei deiner eigenen privaten Test-App normal: „Erweitert“ → „Weiter zu Jarvis (unsicher)“ → die Häkchen setzen → „Weiter“. Solange die App bei Google im Status „Test“ ist, will Google die Zustimmung ab und zu erneuern (oft nach 7 Tagen) – dann einfach wieder „Verbinden“ tippen.</p>
+        </details>
+        <p class="hint">Gut zu wissen: Zum Zusammenfassen geht eine Mail, die du vorlesen lässt, an dein Gehirn (Gemini oder Claude). WhatsApp-Nachrichten lesen kann eine Webseite nicht – das geht nur mit Jarvis am Mac. Schreiben geht hier als Entwurf („Schreib Tom bei WhatsApp …“), abschicken tippst du selbst.</p>
       </section>
 
       <section class="panel" id="sec-voice">
@@ -247,11 +342,26 @@
       <section class="panel" id="sec-wake">
         <header><span class="tag">WAKE-WORD</span><span class="chips"><span class="tag dim chip" id="mic-state">—</span><span class="tag dim chip" id="wake-state">—</span></span></header>
         <label class="check"><input id="f-wake" type="checkbox"> „Jarvis“ / „Hey Jarvis“ hören, solange die App offen ist</label>
-        <label class="check"><input id="f-background" type="checkbox"> Im Hintergrund starten (schwarzer Bildschirm, lauscht)</label>
+        <label class="check"><input id="f-background" type="checkbox"> Beim Start still im Hintergrund lauschen (schwarzer Bildschirm)</label>
         <label class="check"><input id="f-listen-open" type="checkbox"> Beim Öffnen zuhören</label>
         <label class="check"><input id="f-greeting" type="checkbox"> Begrüßung beim Start („Ja, Boss?“)</label>
         <label class="check"><input id="f-keepawake" type="checkbox"> Bildschirm wach halten, solange Jarvis lauscht</label>
-        <button type="button" data-cmd="open_help">„Hey Jarvis“ einrichten</button>
+        <p class="hint">Eine Webseite hört nur zu, solange sie offen ist und der Bildschirm an bleibt. Gesperrt oder geschlossen hilft auf dem iPhone ein Sprachkurzbefehl (siehe „Hey Jarvis“ einrichten).</p>
+        <div class="btnrow">
+          <button type="button" data-cmd="open_help">„Hey Jarvis“ einrichten</button>
+          <button type="button" data-cmd="open_welcome">Jarvis einrichten (Schritt für Schritt)</button>
+        </div>
+      </section>
+
+      <section class="panel" id="sec-think">
+        <header><span class="tag">MITDENKEN</span></header>
+        <p class="hint first">Statt „Kann ich sonst noch was tun?“ schlägt Jarvis höchstens einen konkreten nächsten Schritt vor („Soll ich dich um 9:45 erinnern?“). Ein „ja“ reicht, dann erledigt er es. Nach drei Absagen am Stück ist 30 Minuten Ruhe.</p>
+        <label class="check"><input id="f-offers" type="checkbox"> Nächste Schritte vorschlagen</label>
+        <label class="check"><input id="f-fu-offer" type="checkbox"> Nach einem Vorschlag kurz zuhören („ja“ reicht)</label>
+        <label class="check"><input id="f-fu-question" type="checkbox"> Nach einer Rückfrage kurz zuhören</label>
+        <label class="check"><input id="f-fu-chat" type="checkbox"> Beim Plaudern ohne „Jarvis“ weiter zuhören</label>
+        <label for="f-chat-seconds">Plaudern: so lange weiter zuhören (s)</label>
+        <input id="f-chat-seconds" type="number" min="2" max="15" step="1" inputmode="numeric">
       </section>
 
       <section class="panel" id="sec-look">
@@ -269,6 +379,8 @@
         <summary><span class="tag">FEINEINSTELLUNGEN</span></summary>
         <label for="f-silence">Pause bis zur Antwort (s)</label>
         <input id="f-silence" type="number" min="0.6" max="4" step="0.1" inputmode="decimal">
+        <label for="f-unsure">Pause, wenn der Satz unsicher endet (s)</label>
+        <input id="f-unsure" type="number" min="0.8" max="4" step="0.1" inputmode="decimal">
         <label for="f-hesitation">Pause nach „äh“/„und“ (s)</label>
         <input id="f-hesitation" type="number" min="1" max="5" step="0.1" inputmode="decimal">
         <label for="f-maxrecord">Längste Aufnahme (s)</label>
@@ -277,7 +389,7 @@
         <input id="f-sentences" type="number" min="1" max="8" step="1" inputmode="numeric">
         <label for="f-imageseconds">Bild-Anzeige (s)</label>
         <input id="f-imageseconds" type="number" min="3" max="120" step="1" inputmode="numeric">
-        <label for="f-closing">Frage nach Befehlen (leer = keine)</label>
+        <label for="f-closing">Frage am Ende eines Ablaufs (leer = keine)</label>
         <input id="f-closing" type="text" autocomplete="off" spellcheck="false">
       </details>
 
@@ -336,9 +448,16 @@
 
       <section class="panel">
         <h3>2. „Hey Jarvis“, während Jarvis offen ist</h3>
-        <p data-device="ios">Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Der Bildschirm bleibt dafür an; am besten hängt das iPhone am Ladekabel. Sperrst du das iPhone oder wechselst die App, hört Jarvis nicht mehr zu.</p>
-        <p data-device="android" hidden>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Der Bildschirm bleibt dafür an; am besten hängt das Handy am Ladekabel. Sperrst du das Handy oder wechselst die App, hört Jarvis nicht mehr zu. Android spielt beim Start der Spracherkennung einen kurzen Ton; Jarvis startet sie darum erst, wenn jemand spricht.</p>
+        <p data-device="ios">Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Nach „Jarvis einrichten“ startet Jarvis jedes Mal still im Hintergrund; nach einem Neustart der App kann das iPhone einmal ein Tippen verlangen („Tippen, um Jarvis zu starten“). Der Bildschirm bleibt dafür an; am besten hängt das iPhone am Ladekabel. Ehrlich: Sperrst du das iPhone, wechselst die App oder schließt sie, hört keine Webseite mehr zu – dann hilft nur der Sprachkurzbefehl unten.</p>
+        <p data-device="android" hidden>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, auch wenn der Bildschirm schwarz ist („☾ Hintergrund“ oder „Geh in den Hintergrund“). Nach „Jarvis einrichten“ startet Jarvis jedes Mal still im Hintergrund. Der Bildschirm bleibt dafür an; am besten hängt das Handy am Ladekabel. Ehrlich: Sperrst du das Handy, wechselst die App oder schließt sie, hört keine Webseite mehr zu. Android spielt beim Start der Spracherkennung einen kurzen Ton; Jarvis startet sie darum erst, wenn jemand spricht.</p>
         <p data-device="desktop" hidden>Schalte „◎ Wake-Word“ ein. Dann reicht „Jarvis“ oder „Hey Jarvis“, solange der Tab mit Jarvis offen und sichtbar ist, auch im schwarzen Modus („☾ Hintergrund“). In einem Hintergrund-Tab oder minimierten Fenster hört Jarvis nicht zu. „Bildschirm wach halten“ ist am Computer zuerst aus, damit Bildschirmschoner und Sperre greifen.</p>
+      </section>
+
+      <section class="panel" id="help-gestures">
+        <h3>Das Gehirn bedienen</h3>
+        <p data-device="ios">Antippen: zuhören, nochmal antippen: fertig bzw. stopp. Mit einem Finger ziehen: das Gehirn in diese Richtung zur Milchstraße langziehen und aufziehen. Zweimal tippen: zurück in die Ursprungsform. Zwei Finger auseinander oder zusammen: größer oder kleiner. Zwei Finger gemeinsam ziehen: verschieben. Lange drücken und ziehen: eine einzelne Kugel herausziehen. Per Stimme: „Zeig dein Gehirn als Galaxie“ (oder Netz, Kern, Schalen, Ringe), „Form zurück“, „Kugel zurück in die Mitte“.</p>
+        <p data-device="android" hidden>Antippen: zuhören, nochmal antippen: fertig bzw. stopp. Mit einem Finger ziehen: das Gehirn in diese Richtung zur Milchstraße langziehen und aufziehen. Zweimal tippen: zurück in die Ursprungsform. Zwei Finger auseinander oder zusammen: größer oder kleiner. Zwei Finger gemeinsam ziehen: verschieben. Lange drücken und ziehen: eine einzelne Kugel herausziehen. Per Stimme: „Zeig dein Gehirn als Galaxie“ (oder Netz, Kern, Schalen, Ringe), „Form zurück“, „Kugel zurück in die Mitte“.</p>
+        <p data-device="desktop" hidden>Wie am Mac: Klick zuhören bzw. stopp, Doppelklick zurück in die Ursprungsform. Mit der linken Maustaste ziehen: zur Milchstraße langziehen. Mausrad: aufziehen bzw. zusammenziehen, Strg (am Mac Cmd) + Mausrad: Größe. Mit der rechten Maustaste ziehen: verschieben. Alt + ziehen: eine einzelne Kugel herausziehen. Per Stimme: „Zeig dein Gehirn als Galaxie“ (oder Netz, Kern, Schalen, Ringe), „Form zurück“, „Kugel zurück in die Mitte“.</p>
       </section>
 
       <section class="panel" data-device="ios">
@@ -353,17 +472,17 @@
 
       <section class="panel" data-device="ios">
         <h3>4. Was Jarvis auf dem iPhone nicht kann</h3>
-        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links und Apps öffnet iOS erst nach einem Antippen: Jarvis zeigt sie als Knopf über der Eingabezeile. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+        <p>Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp-Nachrichten lesen geht hier nicht – WhatsApp lesen kann nur Jarvis am Mac. WhatsApp schreiben geht als Entwurf („Schreib Tom bei WhatsApp …“), abschicken tippst du selbst. Kalender und Gmail gehen, sobald du unter ⚙ Einstellungen „Google verbinden“ einrichtest. Links und Apps öffnet iOS erst nach einem Antippen: Jarvis zeigt sie als Knopf über der Eingabezeile. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
       </section>
 
       <section class="panel" data-device="android" hidden>
         <h3>3. Was Jarvis auf dem Handy nicht kann</h3>
-        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links und Apps zeigt Jarvis als Knopf über der Eingabezeile; ein Antippen öffnet sie. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+        <p>Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp-Nachrichten lesen geht hier nicht – WhatsApp lesen kann nur Jarvis am Mac. WhatsApp schreiben geht als Entwurf („Schreib Tom bei WhatsApp …“), abschicken tippst du selbst. Kalender und Gmail gehen, sobald du unter ⚙ Einstellungen „Google verbinden“ einrichtest. Links und Apps zeigt Jarvis als Knopf über der Eingabezeile; ein Antippen öffnet sie. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
       </section>
 
       <section class="panel" data-device="desktop" hidden>
         <h3>3. Was Jarvis im Browser nicht kann</h3>
-        <p>Mails und Google-Kalender lesen, Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp vorlesen geht hier nicht. Links zeigt Jarvis als Knopf über der Eingabezeile; ein Klick öffnet sie in einem neuen Tab. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
+        <p>Lautstärke und Musik steuern, Programme öffnen und schließen, den Hotspot verbinden und WhatsApp-Nachrichten lesen geht hier nicht – WhatsApp lesen kann nur Jarvis am Mac. WhatsApp schreiben geht als Entwurf („Schreib Tom bei WhatsApp …“), abschicken klickst du selbst. Kalender und Gmail gehen, sobald du unter ⚙ Einstellungen „Google verbinden“ einrichtest. Links zeigt Jarvis als Knopf über der Eingabezeile; ein Klick öffnet sie in einem neuen Tab. Timer klingeln nur, solange Jarvis offen ist; war Jarvis zu, meldet er sich beim nächsten Öffnen.</p>
       </section>
       <button type="button" data-cmd="open_setup">⚙ Einstellungen</button>
     </div>

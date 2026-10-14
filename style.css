@@ -27,7 +27,7 @@
 /* ================= Farben (Themen) ================= */
 :root {
   --gutter: 16px; --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px); --kb: 0px;
-  --amber: #ffb84d; --red: #ff4459; --green: #5cffb6; --galaxy: .3; color-scheme: dark;
+  --amber: #ffb84d; --red: #ff4459; --green: #5cffb6; --galaxy-bright: .3; --galaxy: 0; color-scheme: dark;
 }
 html, html[data-theme="mac"] { /* Mac style.css L1-20 (Overlay V3) */
   --c-rgb: 255, 42, 64; --cyan: #ff2a40; --sky: #ff806e; --text: #ffeceb; --muted: #c98d90;
@@ -70,13 +70,33 @@ button { cursor: pointer; touch-action: manipulation; }
 [hidden] { display: none !important; }
 
 /* ================= Galaxie im Hintergrund (Mac L423-431) ================= */
-#galaxy { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; opacity: var(--galaxy, .3); }
+#galaxy { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; opacity: var(--galaxy-bright, .3); }
 #gx-stars { position: absolute; left: -10%; top: -10%; width: 120%; height: 120%; animation: gx-drift 150s ease-in-out infinite alternate; }
 #gx-live { position: absolute; inset: 0; width: 100%; height: 100%; }
 @keyframes gx-drift { from { transform: rotate(-2.5deg) scale(1); } to { transform: rotate(2.5deg) scale(1.05); } }
 
 /* ================= Rahmen: Ecken, Gitter (Mac L186-206) ================= */
 .frame { position: fixed; inset: 0; z-index: 1; pointer-events: none; }
+/* Hauch Milchstraße im Hintergrund (Mac style.css, 13.10. abends): kaum sichtbar, beim Aufziehen des Gehirns heller
+   (--galaxy setzt neuro.js, 0 … 1). Handy: das gedrehte Band liegt in ::before, damit nichts über den Rand ragt. */
+.frame .milkyway {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+  opacity: calc(.09 + .22 * var(--galaxy, 0)); transition: opacity .6s ease;
+}
+.frame .milkyway::before {
+  content: ""; position: absolute; inset: -10%; transform: rotate(-24deg);
+  background:
+    radial-gradient(ellipse 60% 9% at 50% 50%, rgba(170, 150, 255, .55), transparent 70%),
+    radial-gradient(ellipse 45% 16% at 38% 48%, rgba(110, 70, 220, .5), transparent 72%),
+    radial-gradient(ellipse 40% 14% at 64% 53%, rgba(60, 90, 230, .45), transparent 72%),
+    radial-gradient(ellipse 70% 26% at 50% 50%, rgba(40, 30, 110, .45), transparent 75%),
+    radial-gradient(1px 1px at 12% 44%, #fff, transparent), radial-gradient(1px 1px at 27% 57%, #dde, transparent),
+    radial-gradient(1px 1px at 41% 46%, #fff, transparent), radial-gradient(1px 1px at 55% 55%, #ccf, transparent),
+    radial-gradient(1px 1px at 69% 47%, #fff, transparent), radial-gradient(1px 1px at 83% 54%, #dde, transparent),
+    radial-gradient(1px 1px at 33% 51%, #ccf, transparent), radial-gradient(1px 1px at 61% 49%, #fff, transparent);
+}
+/* Hochformat: das Band läuft steiler über den langen Bildschirm (sonst nur ein kurzer Strich in der Mitte) */
+@media (max-aspect-ratio: 4/5) { .frame .milkyway::before { inset: -20% -70%; transform: rotate(-62deg); } }
 .frame .grid {
   position: absolute; inset: 0; opacity: .5;
   background:
@@ -157,7 +177,9 @@ button { cursor: pointer; touch-action: manipulation; }
 body:not(.state-idle) .stage { transform: scale(1); opacity: 1; }
 body.state-loading .stage { transform: scale(.77); }
 body.dim .stage { opacity: .5; }
-#orb { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; display: block; }
+/* Platz zum kosmischen Aufziehen (Mac: 900er-Canvas um eine 600er-Bühne): das Canvas ist 1,5 × so groß wie die Bühne,
+   der Rand wird von .stage-wrap abgeschnitten */
+#orb { position: absolute; left: -25%; top: -25%; width: 150%; height: 150%; pointer-events: none; display: block; }
 .state-label {
   position: absolute; left: 0; right: 0; top: 86%; text-align: center; pointer-events: none;
   font: 700 11px Orbitron, sans-serif; letter-spacing: .45em; text-indent: .45em; color: var(--accent);
@@ -182,21 +204,42 @@ body.state-idle .tm { opacity: .7; }
 /* Unter der Kugel nie übereinander: Link-Knöpfe stehen direkt über der Eingabezeile, der Hinweis darüber; solange
    Links oder der Hinweis da sind, ist die Telemetrie weg, und während des Hinweises auch die Zustandsschrift. */
 body.has-links .telemetry, body.toast-on .telemetry { opacity: 0; }
-body.toast-on .state-label { opacity: 0; }
+body.toast-on .state-label, body.text-open .state-label { opacity: 0; }   /* Text-Karte: kein „HÖRE ZU“ unter der Fußzeile */
 
-/* Bild: „Zeig mir ein Bild von …“ (Mac L331-339), auf der Bühne */
+/* Bild: „Zeig mir ein Bild von …“ (Mac L331-339), auf der Bühne. Wie am Mac seit 13.10. abends: kein Kasten, das
+   Bild leicht durchsichtig; die Kugel tritt dahinter zurück (Handy: beides liegt auf derselben Bühne) */
 #imgview {
   position: absolute; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; padding: 8px;
-  border-radius: 12px; background: rgba(0, 0, 0, .72); border: 1px solid var(--cyan-3); box-shadow: 0 0 34px var(--accent-soft);
+  border-radius: 12px; background: transparent; border: 0; box-shadow: none;
 }
+body.image-open .stage { opacity: .15; }
 #imgview.show { display: flex; animation: imgin .35s ease-out; }
 #imgview.small img { max-width: min(100%, 360px); max-height: min(100%, 360px); } /* kleine Bilder nicht aufblasen */
-#imgview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
+#imgview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; opacity: .7;
+  filter: drop-shadow(0 0 18px rgba(0, 0, 0, .55)); }
 #imgview span {
   position: absolute; left: 14px; bottom: 9px; right: 14px; font: 700 11px Orbitron, sans-serif; letter-spacing: .12em;
   color: var(--muted); text-transform: uppercase; text-shadow: 0 0 6px #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 @keyframes imgin { from { opacity: 0; } to { opacity: 1; } }
+
+/* Schwebender Text (Mac #textcard, 13.10. abends): keine Fläche, kein Rahmen – nur lesbare Schrift über der Kugel */
+#textcard {
+  position: absolute; left: 0; right: 0; top: 2px; z-index: 5; display: none; padding: 0 8px; max-height: calc(100% - 6px);
+  overflow: hidden; text-align: center; pointer-events: none; background: transparent;
+  text-shadow: 0 0 2px #000, 0 0 10px #000, 0 0 22px rgba(0, 0, 0, .9);
+}
+#textcard.show { display: block; animation: imgin .35s ease-out; }
+#textcard b { display: block; font: 700 13px Orbitron, sans-serif; letter-spacing: .14em; color: var(--accent); text-transform: uppercase; }
+#textcard div { margin-top: 6px; font: 600 21px/1.32 Rajdhani, sans-serif; color: #fff; white-space: pre-line; overflow-wrap: anywhere; }
+#textcard small { display: block; margin-top: 6px; font: 600 11px Rajdhani, sans-serif; color: var(--muted); }
+/* zu lang selbst in 14 px (fitText in hud.js): scrollbar statt abgeschnitten, unten ausgeblendet */
+#textcard.scroll {
+  overflow-y: auto; pointer-events: auto; overscroll-behavior: contain; padding-bottom: 26px; touch-action: pan-y;
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 26px), transparent); mask-image: linear-gradient(#000 calc(100% - 26px), transparent);
+}
+body.text-open .stage { opacity: .3; }
+#textcard.show ~ .telemetry { opacity: 0; }
 
 /* 3D-Modell (live L340-356): deckt die Bühne ab, die Kugel tritt dahinter zurück */
 #model3d {
@@ -349,7 +392,23 @@ body.dim .panel { opacity: .62; }
 .log { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--cyan-3) transparent; -webkit-user-select: text; user-select: text; }
 .entry { margin: 0 0 6px; animation: fadein .3s ease; }
 .entry .who { display: block; font: 700 9px/1.6 Orbitron, sans-serif; letter-spacing: .14em; color: var(--muted); }
-.entry .msg { overflow-wrap: anywhere; }
+.entry .msg { display: block; overflow-wrap: anywhere; line-height: 1.42; }
+/* Lesbarer (Wunsch 13.10. abends): ältere Einträge höchstens drei Zeilen (System/Aktion zwei), die letzte blendet aus;
+   Antippen zeigt sie ganz. Der neueste Satz von dir oder Jarvis (.newest, hud.js) steht voll da, heller und mit
+   Akzentlinie; was danach kommt (System, Aktion), bleibt ebenfalls ganz. */
+.entry:not(.newest):not(:last-child):not(.open) .msg {
+  max-height: calc(3 * 1.42em); overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 1.3em), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 1.3em), transparent);
+}
+.entry.tool:not(:last-child):not(.open) .msg, .entry.system:not(:last-child):not(.open) .msg { max-height: calc(2 * 1.42em); }
+.entry.newest ~ .entry .msg { max-height: none; -webkit-mask-image: none; mask-image: none; }
+.entry:not(.newest) { opacity: .78; }
+.entry:not(.newest):not(:last-child) { cursor: pointer; }
+.entry.newest ~ .entry { opacity: .9; }
+.entry.newest { padding-left: 9px; border-left: 2px solid var(--accent); box-shadow: -6px 0 12px -10px var(--accent); }
+.entry.newest .msg { color: #fff; }
+.entry.open { opacity: 1; }
 .entry.jarvis .who { color: var(--accent); }
 .entry.user .msg { color: #fff; }
 .entry.tool .msg, .entry.system .msg { color: var(--muted); font-size: 13px; }
@@ -595,6 +654,8 @@ html.is-hidden #veil { visibility: visible; opacity: 1; transition: opacity .32s
 .sheet .sheet-body button:not(.primary):not(.close) { text-align: center; }
 .sheet .btnrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .sheet .btnrow button { text-align: center; }
+/* Knopftexte in Blättern umbrechen statt „Anleitung und Clie…“ */
+.sheet .sheet-body .btnrow button:not(.primary):not(.close) { white-space: normal; text-overflow: clip; line-height: 1.2; }
 .sheet button.danger { color: var(--red); border-color: rgba(255, 68, 89, .5); }
 .sheet details.panel > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; min-height: 28px; cursor: pointer; }
 .sheet details.panel > summary::-webkit-details-marker { display: none; }
@@ -649,9 +710,65 @@ html.reduced .stage { transition: opacity .4s ease; }
   .stage { transition: opacity .4s ease; }
 }
 
+/* ================= Handy hochkant: alles etwas kleiner, mehr Platz fürs Protokoll (Wunsch 13.10. abends) =========
+   Kopfzeile, Weltuhren, Telemetrie, Panels und Laufband rund 15 % kleiner; die Bühne wird etwas kleiner, das Deck
+   größer; die Eingabezeile und alle Knöpfe behalten ≥ 44 px Trefferfläche, die Eingabe 16 px (sonst zoomt iOS). */
+@media (max-width: 699px) {
+  #app {
+    row-gap: 5px; padding-top: calc(var(--safe-t) + 4px); padding-bottom: calc(var(--safe-b) + 4px + var(--kb));
+    grid-template-rows: 34px 19px 24px minmax(180px, 1fr) auto 44px minmax(0, 290px) 12px 22px;
+  }
+  .brand { font-size: 13px; letter-spacing: .24em; }
+  .brand .logo { margin-right: 6px; }
+  .brand .sub { font-size: 9px; letter-spacing: .26em; }
+  .topclock { font-size: 17px; }
+  .close-x { width: 30px; height: 30px; font-size: 13px; }
+  .topstatus { font-size: 12.5px; gap: 7px; }
+  .topstatus b { font-size: 10px; letter-spacing: .22em; }
+  .dot { width: 7px; height: 7px; }
+  .wc span { font-size: 8px; letter-spacing: .18em; }
+  .wc b { font-size: 11.5px; }
+  .tm { padding: 2px 8px; }
+  .tm span { font-size: 8px; letter-spacing: .18em; }
+  .tm b { font-size: 11px; }
+  .state-label { font-size: 10px; letter-spacing: .4em; text-indent: .4em; }
+  .cmdline { padding-left: 14px; }
+  .cmdline .prompt { font-size: 16px; }
+  .panel { padding: 10px 12px 12px; }
+  .panel header { margin-bottom: 6px; }
+  .tag { font-size: 10px; letter-spacing: .16em; }
+  .tag.dim { font-size: 10px; }
+  .clock { font-size: 34px; }
+  .clock .sec { font-size: 14px; }
+  .date { font-size: 14.5px; }
+  .calinfo { font-size: 10px; }
+  .gauge svg { width: 56px; height: 56px; }
+  .gauge b { top: 19px; font-size: 12px; }
+  .kt-big { font-size: 23px; }
+  .kt-mid { font-size: 17px; }
+  /* Protokoll: angenehme Zeilenhöhe, der neueste Eintrag etwas größer */
+  .log { font-size: 15px; }
+  .entry { margin-bottom: 8px; }
+  .entry .who { font-size: 8.5px; }
+  .entry.newest .msg { font-size: 16px; line-height: 1.45; }
+  .entry.tool .msg, .entry.system .msg { font-size: 12.5px; }
+  .dots button::before { top: 17px; width: 7px; height: 7px; }
+  .dots button { margin: -16px 0; }
+  .ticker { height: 22px; }
+  .ticker-track { padding-left: 22px; }
+  .tk { font-size: 12.5px; margin-right: 32px; }
+  .tk b { font-size: 10.5px; margin-right: 6px; }
+  .act { min-height: 34px; font-size: 14px; padding: 5px 12px; }
+  body.focus #app { grid-template-rows: 34px 19px 0 minmax(200px, 1fr) auto 44px 0 0 0; }
+  body.kb-open #app { grid-template-rows: 34px 19px 24px minmax(0, 1fr) auto 44px 0 0 0; }
+}
+
 /* ================= Kleine Bildschirme ================= */
 @media (max-height: 640px) {
   #app { row-gap: 5px; grid-template-rows: 40px 22px 28px minmax(150px, 1fr) auto 44px minmax(0, 190px) 14px 26px; }
+}
+@media (max-height: 640px) and (max-width: 699px) {
+  #app { row-gap: 4px; grid-template-rows: 34px 19px 24px minmax(140px, 1fr) auto 44px minmax(0, 196px) 12px 22px; }
 }
 @media (max-width: 350px) {
   :root { --gutter: 12px; }
@@ -773,6 +890,10 @@ html.reduced .stage { transition: opacity .4s ease; }
   #p-control .buttons { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #p-control .buttons button { font-size: 13.5px; padding-left: 6px; padding-right: 6px; }
   .brand { font-size: 17px; letter-spacing: .32em; }
+  #textcard { top: 8px; left: 50%; right: auto; width: min(760px, 100%); transform: translateX(-50%); }
+  #textcard b { font-size: 15px; }
+  #textcard div { margin-top: 8px; font-size: 26px; line-height: 1.35; }
+  #textcard small { margin-top: 8px; font-size: 12px; }
   body.focus #app, body.kb-open #app { grid-template-rows: 40px minmax(0, 1fr) auto 46px 26px; }
   body.focus .worldclocks { display: none; }
 }
@@ -794,3 +915,39 @@ html.reduced .stage { transition: opacity .4s ease; }
   .dots { grid-area: 5 / 2 / 6 / 3; }
   body.focus #app, body.kb-open #app { grid-template-rows: 34px 20px minmax(0, 1fr) auto 40px; }
 }
+
+/* ================= v4: „Jarvis einrichten“, Google verbinden, Bestätigen ================= */
+/* über dem Schleier (Hintergrund-Modus), unter Freischalten und Start */
+.sheet.welcome { z-index: 55; }
+.welcome h3 { margin: 0 0 8px; font: 700 13px/1.4 Orbitron, sans-serif; letter-spacing: .1em; color: var(--accent); }
+.welcome .panel p { margin: 6px 0 0; line-height: 1.42; }
+.welcome .panel p.note { color: var(--muted); font-size: 14px; }
+.sheet .panel > button.primary, .sheet .btnrow button.primary {
+  min-height: 48px; border: 1px solid var(--cyan); border-radius: 3px; text-align: center; color: #000; background: var(--cyan);
+  font: 700 12px Orbitron, sans-serif; letter-spacing: .12em; box-shadow: 0 0 18px var(--accent-soft);
+  white-space: normal; line-height: 1.25;
+}
+.sheet .panel > button.primary:active, .sheet .btnrow button.primary:active { transform: translateY(1px); }
+.wz-status { min-height: 0; }
+.wz-status:empty { display: none; }
+.wz-status.ok { color: var(--green); }
+.wz-status.warn { color: var(--amber); }
+.wz-dots { display: flex; justify-content: center; gap: 10px; padding: 2px 0; }
+.wz-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan-3); transition: background .2s, box-shadow .2s; }
+.wz-dots i.done { background: var(--cyan-2); }
+.wz-dots i.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.welcome .wz-nav { margin-top: 0; }
+.welcome .wz-nav #wz-next.go { color: var(--accent); border-color: var(--accent); }
+.welcome .wz-nav button[hidden] { display: none; }
+.welcome .wz-go { margin-top: 12px; }
+.sheet ol.steps { margin: 8px 0 0; padding-left: 22px; display: grid; gap: 7px; line-height: 1.4; }
+.sheet ol.steps li::marker { color: var(--accent); font-weight: 700; }
+#google-origin { color: var(--sky); font: 600 14px ui-monospace, Menlo, monospace; overflow-wrap: anywhere;
+  -webkit-user-select: all; user-select: all; }
+#google-account.ok { color: var(--green); }
+#google-account.warn { color: var(--amber); }
+/* Ja/Nein-Knöpfe zum Termin bzw. zur Mail (Bestätigen, nie automatisch) */
+.act.yes { color: #000; background: var(--cyan); border-color: var(--cyan); }
+.act.yes:active { background: var(--sky); }
+.act.no { color: var(--muted); border-color: var(--cyan-3); box-shadow: none; }
+.act.google { border-style: dashed; }

@@ -1,7 +1,7 @@
 // ==============================================================================================================
 // CONTRACT – app.js (owner: builder CORE). Spec: ARCHITECTURE.md §3.2.11, §3.4, §4 (+ CHANGES-1 CR1-CR3).
 // Entry module (index.html, type="module"). No exports. Imports:
-//   store.js, intents.js, ears.js, voice.js, brain.js, tools.js, hud.js, sheets.js, awake.js
+//   store.js, intents.js, ears.js, voice.js, brain.js, tools.js, hud.js, sheets.js, awake.js, mitdenken.js
 // Only app.js changes `state` (loading|idle|listening|transcribing|thinking|speaking|error) and
 // `mode` (shown|hidden|stealth); it reflects them through hud.setState() and hud.setVisibility().
 // Flows: boot incl. store.importFromLocation() for #cfg= / ?wake=1 (§4.2, no forced setup sheet: CR1); gesture unlock
@@ -9,13 +9,24 @@
 // command, bare name → "Ja, {A}?" + 4 s follow-up (§4.4, D4); listen / interrupt / resumeIdle with one recognizer at
 // a time and no wake recognizer while thinking or speaking (§4.5, D5); handleText: intents.quickIntent → tools,
 // else (brain configured) brain.ask streaming → voice.say sentence by sentence → tools.runAction for AKTION results
-// (SAFE_AFTER_WEB and learn guard, D15/D18) → closing phrase (§4.6), else the free noBrain line with a ⚙ button (CR1.3);
+// (SAFE_AFTER_WEB and learn guard, D15/D18) → Mitdenken (VORSCHLAG: one offer, „ja“ runs it without the brain;
+// NACHFRAGE: „Sonst noch was?“ only at the end of a flow, ≤ every 10 min) and Plaudern (PLAUDERN: ja or smalltalk →
+// 6 s listening without the wake word, ≤ 10 sentences in a row), else the free noBrain line with a ⚙ button (CR1.3);
 // action results drive links, images, 3D models and the orb (applyResult); hidden / stealth modes close the model
 // (§4.8); timers incl. the Mac 30-minute missed-timer rule, idle dim, auto-hide, visibility (§4.9); commands (§4.10);
 // desktop keys Ctrl+Alt+Space / J / K and Escape (CR3); Android/browser Back closes sheets and the 3D model (history).
+// v4: first visit (store.setupDone() false, no ?wake=1 / #cfg=) → „Jarvis einrichten“ (sheets "welcome"): each step
+// runs inside its own tap (mic, wake lock, voice, brain, Google); „Los geht's“ stores startInBackground and starts the
+// silent background mode (stealth, wake word on); every later start goes there by itself (existing unlock catcher when
+// the browser wants a tap). Google (google.js): calendar/mail quick intents and brain actions; writes (calendar_create,
+// mail_draft, mail_send) only after his „ja“ or a tap on the card buttons (pendingWrite, 180 s); a mail he lets Jarvis
+// read is summarised by the brain as data (SAFE_AFTER_MAIL, no learning for the rest of the conversation); expired
+// Google access → silent renewal, else a „Google verbinden“ button whose tap reconnects and repeats the request.
 // Test hook (always on, contains no secrets):
 //   window.__jarvis = { get state, get mode, get muted, get wake, get locked, spoken: [], heard: [],
-//                       handle(text, { spoken }), listen(), stop(), stealth(), show(), version: "2.0.0" }
+//                       handle(text, { spoken }), listen(), stop(), stealth(), show(), version: "2.0.0",
+//                       get orb (form/aufzug/position), get offer (Mitdenken), get chatTurns, get follow,
+//                       get setup ({ active, done }), get pending (Bestätigen), get google (google.status()) }
 // ==============================================================================================================
 // JARVIS: Steuerung. Zustände, Abläufe und Sätze wie am Mac (Controller in jarvis.py):
 // BOOT → BEREIT → HÖRE ZU → (VERSTEHE) → DENKE NACH → SPRICHT → BEREIT; „Jarvis“ holt ihn jederzeit zurück.
@@ -28,6 +39,8 @@ import * as tools from "./tools.js";
 import * as hud from "./hud.js";
 import * as sheets from "./sheets.js";
 import * as awake from "./awake.js";
+import * as mit from "./mitdenken.js";
+import * as google from "./google.js";
 
 const VERSION = "2.0.0";
 const FOLLOW_UP_DELAY_MS = 350;            // Mac speak_done: 0,35 s Nachhall, dann zuhören
@@ -42,11 +55,27 @@ const LISTEN_ON_OPEN_MS = 2000;
 const TICK_MS = 1000;
 const TEST_TIMEOUT_MS = 15000;
 const SETUP_HREF = "#jarvis-einstellungen";
+const GOOGLE_SETUP_HREF = "#jarvis-google-einrichten";
+const GOOGLE_HREF = "#jarvis-google";
+const GMAIL_HREF = "#jarvis-gmail";
+const CONFIRM_HREF = "#jarvis-ok-";                 // + ja | nein | entwurf
+const PENDING_MS = 180000;                          // so lange gilt „Soll ich … eintragen / abschicken?“ (Mac 180 s)
+const AFTER_CONNECT_MS = 120000;                    // nach „Google verbinden“: die Bitte von eben noch einmal
+const GOOGLE_REFRESH_MS = 10 * 60000;               // Termine aus dem Google-Kalender fürs Panel
+const MAIL_PROMPT_CHARS = 2500;
 const CLAUDE_KEY_RX = /^sk-ant-[A-Za-z0-9_-]{20,}$/;
 const GEMINI_KEY_RX = /^[A-Za-z0-9_-]{30,}$/;
 const GEMINI_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"];
-const TIMING_KEYS = ["silenceSeconds", "hesitationSeconds", "maxRecordSeconds", "noSpeechSeconds", "followUpSeconds"];
-const SAY_TYPES = new Set(["weather", "show_image", "next_image"]);
+const TIMING_KEYS = ["silenceSeconds", "unsureSeconds", "hesitationSeconds", "maxRecordSeconds", "noSpeechSeconds", "followUpSeconds"];
+const CHAT_MAX_TURNS = 10;                 // Plaudern: höchstens so viele Sätze am Stück ohne „Jarvis“ (Mac)
+const HISTORY_SHOW_MS = 3600000;           // nach dem Neuladen die letzte Stunde Gespräch zeigen (Mac „history“)
+const VERGISS_DAS = /^(?:okay |ok )?vergiss das(?: wieder| bitte| jarvis| boss)*$/u;
+const NEW_TOPIC = /(?:^|\s)(?:neues gespräch|neues thema)(?:\s|$)/u;
+// beim Plaudern ohne „Jarvis“ gehört (vielleicht der Fernseher): nichts eintragen, buchen, lernen oder vorbereiten, was
+// an andere geht (Mac: ohne Weckwort keine Nachrichten senden, keine Termine ändern)
+const NO_CHAT_ACTIONS = new Set(["termin", "termin_loeschen", "einnahme", "kontostand", "whatsapp", "call", "remember",
+  "forget_note", "learn_command", "forget_command", "set_setting", "calendar_create", "mail_draft", "mail_send"]);
+const SAY_TYPES = new Set(["weather", "show_image", "next_image", "calendar_list", "mail_list", "mail_read"]);
 // „starting“ ist noch nicht „AKTIV“ (Browser ohne Erkennungsdienst blieben sonst ewig scheinbar aktiv, android-desktop-8)
 const WAKE_LABEL = { on: "AKTIV", starting: "STARTET", off: "AUS", paused: "PAUSE", blocked: "GESPERRT",
   unsupported: "NICHT VERFÜGBAR", error: "PAUSE" };
@@ -118,6 +147,20 @@ let imagePausedBy = null;                 // die Zuhör-Runde, die die Bild-Zeit
 let mutedTurn = 0;                        // Runde, die beim Wechsel in den Hintergrund lief: spricht nicht weiter (robustness-9)
 let lastOutsideWake = 0;                  // Rückkehr + pageshow: nur ein „Ja, Boss?“ (robustness-12)
 let importPending = null;                 // Setup-Link, der erst nach Bestätigung gilt (security-privacy-1)
+// Mitdenken und Plaudern (Mac 13.10. abends)
+let offer = null;                         // offener Vorschlag: { actions, question, kind: "offer"|"closing", tainted, window,
+                                          //   heard, at, turn, conv }
+let offerHist = [];                       // [{ at, how: "yes"|"no"|"ignored" }] – drei Absagen am Stück → 30 min Ruhe
+let offerNote = null;                     // { kind: "yes"|"no"|"reply"|"ignored", question, at } fürs Gehirn
+let closingLast = 0;                      // „Sonst noch was?“ höchstens alle 10 Minuten
+let chatTurns = 0;                        // Sätze am Stück ohne „Jarvis“ (Plaudern/Nachhören)
+let convId = 0;                           // ++ bei „neues Gespräch“: ein alter Vorschlag gilt dann nicht mehr
+let followInfo = null;                    // wofür gerade nachgehört wird: { kind: "offer"|"chat"|"question"|"plain"|"confirm", offer }
+let setupActive = false;                  // „Jarvis einrichten“ läuft (erster Besuch)
+let pendingWrite = null;                  // „Soll ich … eintragen / abschicken?“ { kind, op, event|mail, question, card, buttons, at, conv }
+let afterConnect = null;                  // nach „Google verbinden“ wiederholen: { text } | { pending, choice }, at
+let mailTaintConv = -1;                   // in diesem Gespräch kam Mail-Inhalt ans Gehirn (Mac taint)
+let googleTermineAt = 0;
 
 const S = () => store.settings();
 const A = () => store.anrede();
@@ -168,6 +211,18 @@ const hook = {
   stealth() { enterStealth(); },
   show() { leaveHidden({ pop: true }); resumeIdle(); },
   version: VERSION,
+  get orb() { return safe(() => hud.orbState(), null); },
+  get offer() {
+    return offer ? { kind: offer.kind, question: offer.question, heard: !!offer.heard, actions: offer.actions.map((a) => ({ ...a })) } : null;
+  },
+  get chatTurns() { return chatTurns; },
+  get follow() { return followInfo ? { kind: followInfo.kind } : null; },
+  get setup() { return { active: setupActive, done: safe(() => store.setupDone(), false) }; },
+  get pending() {
+    return pendingWrite ? { kind: pendingWrite.kind, op: pendingWrite.op, question: pendingWrite.question,
+      event: pendingWrite.event ? { ...pendingWrite.event } : null, mail: pendingWrite.mail ? { ...pendingWrite.mail } : null } : null;
+  },
+  get google() { return safe(() => google.status(), null); },
 };
 window.__jarvis = hook;
 
@@ -380,20 +435,22 @@ function wakeAvailable() {
 function timingsFrom(s) {
   const ms = (v, d) => (Number.isFinite(Number(v)) ? Number(v) * 1000 : d);
   return {
-    silenceMs: ms(s.silenceSeconds, 2000), hesitationMs: ms(s.hesitationSeconds, 2800), maxMs: ms(s.maxRecordSeconds, 50000),
+    silenceMs: ms(s.silenceSeconds, 900), unsureMs: ms(s.unsureSeconds, 1500), hesitationMs: ms(s.hesitationSeconds, 2000),
+    maxMs: ms(s.maxRecordSeconds, 50000),
     noSpeechMs: ms(s.noSpeechSeconds, 6000), followUpMs: ms(s.followUpSeconds, 4000),
   };
 }
 
 // ---------------------------------------------------------------- Sprechen
 /** Ganze Antwort sprechen (Mac Controller.say: nur die ersten Sätze, Abschlussfrage bleibt). */
-async function speak(text, my) {
+async function speak(text, my, { offer: isOffer = false, full = false } = {}) {
   safe(() => ears.pauseWake(), null);
   const t0 = String(text ?? "").trim();
   if (muted || !t0 || (my && my === mutedTurn)) return;
   const s = S();
-  const t = intents.voiceText(t0, { maxSentences: s.speakMaxSentences, maxChars: s.speakMaxChars,
-    closing: store.closingPhrase() });
+  // „lies sie vor“: die ganze Mail (bis etwa zwei Minuten), sonst das Sprech-Budget wie am Mac
+  const t = intents.voiceText(t0, { maxSentences: full ? 40 : s.speakMaxSentences, maxChars: full ? 2400 : s.speakMaxChars,
+    closing: store.closingPhrase(), offer: isOffer });
   if (!t) return;
   expectSpeech = my;
   if (state !== "speaking") setState("thinking", "Formuliere …");
@@ -412,7 +469,12 @@ function speakChunk(text, my) {
   hook.spoken.push(t);
 }
 
-function finishTurn(my, fu = false) {
+/**
+ * Runde fertig: zurück in BEREIT oder kurz nachhören (Mac speak_done). follow = { kind, label, seconds, offer }:
+ * "offer" (nach einem Vorschlag, „Ja oder nein?“), "chat" (Plaudern ohne Weckwort, 6 s), "question" (Rückfrage),
+ * "plain" (wie bisher, „Noch etwas, Boss?“).
+ */
+function finishTurn(my, fu = false, follow = null) {
   if (my !== turn) return;
   expectSpeech = 0;
   // im Hintergrund kein Nachhören: kein Mikrofon und kein Ton in einer Seite, die man nicht sieht (robustness-9)
@@ -420,12 +482,225 @@ function finishTurn(my, fu = false) {
     setTimeout(() => {
       if (my !== turn) return;
       if (document.visibilityState === "hidden") { setState("idle", "Bereit."); resumeIdle(); return; }
-      listen({ followUp: true });
+      listen({ followUp: true, follow: follow || { kind: "plain" } });
     }, FOLLOW_UP_DELAY_MS);
     return;
   }
   setState("idle", "Bereit.");
   resumeIdle();
+}
+
+// ---------------------------------------------------------------- Mitdenken (Mac 13.10. abends)
+function setOffer(o, my) {
+  offer = { ...o, turn: my, conv: convId, at: Date.now(), heard: false };
+}
+
+/** Die Frage zum Vorschlag wurde wirklich gesprochen: erst jetzt darf ein „ja“ ihn auslösen (Mac say/speak_done). */
+function markOfferHeard(my) {
+  if (!offer || offer.turn !== my) return;
+  if (muted || my === mutedTurn) { offer = null; return; }   // stumm: nie gehört → gilt nicht (drop_unheard_offer)
+  offer.heard = true;
+  offer.at = Date.now();
+}
+
+/**
+ * Seine Antwort auf den letzten Vorschlag: { how: "yes"|"no"|"ignore", offer } oder null (dann läuft alles normal).
+ * strict (aus dem Nachhören ohne Weckwort): ein Ja braucht ein eindeutiges Wort wie „ja“, „gerne“, „mach“.
+ */
+function offerReply(text, strict = false) {
+  const off = offer;
+  if (!off) return null;
+  const t = mit.offerWords(text);
+  if (mit.REPEAT_RX.test(t)) return null;                     // „Wiederhol das“: der Vorschlag bleibt stehen
+  offer = null;                                               // gilt nur für die direkt folgende Antwort
+  if (VERGISS_DAS.test(t) || NEW_TOPIC.test(t)) return null;  // das erledigen die Schnellbefehle wie bisher
+  const now = Date.now();
+  const ttl = (off.kind === "closing" ? mit.OFFER_CLOSING_SECONDS : mit.OFFER_SECONDS) * 1000;
+  if (!off.heard || now - off.at > ttl || off.conv !== convId) return null;
+  const how = mit.offerAnswer(text);
+  if (how === "yes" && strict && !t.split(" ").some((w) => mit.WINDOW_YES.has(w))) return { how: "ignore", offer: off };
+  if (off.kind !== "closing") {
+    offerHist = [...offerHist, { at: now, how: how || "ignored" }].slice(-20);
+    offerNote = { kind: how === "yes" ? "yes" : how === "no" ? "no" : "reply", question: off.question || "", at: now };
+  }
+  return how ? { how, offer: off } : null;
+}
+
+/** „Sonst noch was?“ anhängen, wenn es passt; registriert die Frage als Pseudo-Vorschlag („ja“ → zuhören). */
+function addClosing(text, actions, allow, lang, my) {
+  const base = String(text ?? "").trim();
+  const closed = intents.withClosing(base, actions, store.closingPhrase(), { allow, lang, lastAt: closingLast, anrede: A() });
+  if (closed === base) return { text: base, closing: "" };
+  closingLast = Date.now();
+  const q = closed.slice(base.length).trim();
+  setOffer({ actions: [], question: q, kind: "closing", tainted: false, window: false }, my);
+  return { text: closed, closing: q };
+}
+
+// ---------------------------------------------------------------- Google: Bestätigen, Verbinden, Termine (v4)
+function clearPendingWrite() {
+  if (!pendingWrite) return;
+  pendingWrite = null;
+  safe(() => hud.dropLinks(CONFIRM_HREF), null);
+  safe(() => hud.hideText(), null);
+}
+
+/** Die offene Schreib-Frage, solange sie gilt (180 s, gleiches Gespräch). */
+function pendingFresh() {
+  if (!pendingWrite) return null;
+  if (Date.now() - pendingWrite.at > PENDING_MS || pendingWrite.conv !== convId) {
+    clearPendingWrite();
+    return null;
+  }
+  return pendingWrite;
+}
+
+/** Termin bzw. Mail zeigen (Karte + Knöpfe); ausgeführt wird erst auf sein „ja“ oder ein Tippen (Mac confirm). */
+function setPendingWrite(c, my) {
+  clearPendingWrite();
+  offer = null;                                              // ein „ja“ gehört jetzt zu dieser Frage (Mac ask_send)
+  pendingWrite = { ...c, at: Date.now(), conv: convId, turn: my };
+  if (mode !== "shown") leaveHidden({ pop: true });
+  hud.showText({ ...(c.card || {}), seconds: PENDING_MS / 1000 });
+  for (const b of c.buttons || []) {
+    hud.showLink({ url: CONFIRM_HREF + b.id, label: b.label, icon: b.icon, ms: PENDING_MS,
+      cls: b.id === "ja" ? "yes" : b.id === "nein" ? "no" : "" });
+  }
+}
+
+function googleButton(need) {
+  if (need === "setup") return { url: GOOGLE_SETUP_HREF, label: "Google einrichten", icon: "⚙", cls: "google" };
+  if (need === "mail") return { url: GMAIL_HREF, label: "Gmail erlauben", icon: "✉", cls: "google", ms: AFTER_CONNECT_MS };
+  return { url: GOOGLE_HREF, label: "Google verbinden", icon: "◎", cls: "google", ms: AFTER_CONNECT_MS };
+}
+
+/** Google will ein Tippen (oder ist nicht eingerichtet): Knopf zeigen, die Bitte für danach merken. */
+function offerGoogle(need, retry = null) {
+  if (!need) return;
+  hud.showLink(googleButton(need));
+  if (need === "setup") return;
+  safe(() => google.preload(), null);
+  afterConnect = retry ? { ...retry, at: Date.now() } : null;
+}
+
+/** „Google verbinden“ / „Gmail erlauben“: MUSS synchron im Tippen laufen (Google öffnet ein Fenster). */
+function googleConnectTap(mail = false) {
+  activity();
+  return google.connect({ mail }).then((res) => {
+    if (res.ok) {
+      log("system", mail ? "Gmail erlaubt." : "Google verbunden.");
+      safe(() => { hud.dropLinks(GOOGLE_HREF); hud.dropLinks(GMAIL_HREF); hud.dropLinks(GOOGLE_SETUP_HREF); }, null);
+      refreshGoogleTermine(true);
+      updateStatus();
+      const again = afterConnect && Date.now() - afterConnect.at < AFTER_CONNECT_MS ? afterConnect : null;
+      afterConnect = null;
+      if (again) setTimeout(() => runAfterConnect(again), 0);
+      return { ok: true, text: L("googleConnected") };
+    }
+    const text = res.code === "loading" ? L("googleLoading") : res.code === "notConfigured" ? L("googleSetup")
+      : res.code === "closed" || res.code === "denied" ? L("googleDenied") : L("googleErr");
+    return { ok: false, text };
+  }, () => ({ ok: false, text: L("googleErr") }));
+}
+
+function runAfterConnect(a) {
+  if (a.pending) {                                           // er hatte schon „ja“ gesagt: jetzt eintragen/senden
+    const my = ++turn;
+    interrupt(false);
+    pendingWrite = { ...a.pending, at: Date.now(), conv: convId, turn: my };
+    confirmPending(a.choice || "yes", my).catch((e) => report("confirm", e));
+  } else if (a.text) {
+    submitText(a.text, { spoken: false });
+  }
+}
+
+function refreshGoogleTermine(force = false) {
+  if (!safe(() => google.can("calRead"), false)) return;
+  if (!force && Date.now() - googleTermineAt < GOOGLE_REFRESH_MS) return;
+  googleTermineAt = Date.now();
+  google.refreshEvents({ quiet: true }).then((list) => hud.setExternalTermine(list), () => {});
+}
+
+function onGoogleChange(st) {
+  safe(() => sheets.refresh(), null);
+  if (!st || !st.configured) {
+    safe(() => hud.setExternalTermine([]), null);
+    return;
+  }
+  if (st.calendar && Date.now() - googleTermineAt > 15000) refreshGoogleTermine(true);
+}
+
+function mailTainted() {
+  return mailTaintConv === convId && !!safe(() => store.conversationWebSeen(), false);
+}
+
+/** Seine Antwort auf „Soll ich …?“: "yes" (ausführen), "no" (lassen), "draft" (Mail nur als Entwurf). */
+async function confirmPending(choice, my) {
+  const p = pendingWrite;
+  clearPendingWrite();
+  if (!p) return;
+  if (choice === "no") {
+    const t = L(p.kind === "calendar" ? "calNo" : p.op === "draft" ? "mailDraftNo" : "mailNo");
+    log("jarvis", t);
+    lastAnswer = t;
+    await speak(t, my);
+    finishTurn(my, false);
+    return;
+  }
+  setState("thinking", p.kind === "calendar" ? "Trage ein …" : p.op === "send" && choice !== "draft" ? "Sende …" : "Speichere …");
+  const r = await tools.runConfirmed(p, choice === "draft" ? "entwurf" : "ja", ctx(false, ""));
+  if (my !== turn) return;
+  applyResult(r);
+  if (!r.ok && r.googleNeed) offerGoogle(r.googleNeed, { pending: p, choice });
+  if (r.ok && r.refreshEvents) refreshGoogleTermine(true);
+  const t = String(r.say || (r.ok ? L("offerConfirm") : L("googleErr"))).trim();
+  log("jarvis", t);
+  lastAnswer = t;
+  await speak(t, my);
+  finishTurn(my, false);
+}
+
+/** Tippen auf „✓ Eintragen“ / „➤ Senden“ / „✎ Nur Entwurf“ / „✕ Nein“ unter der Karte. */
+function confirmTap(id) {
+  activity();
+  if (!pendingFresh()) {
+    safe(() => hud.dropLinks(CONFIRM_HREF), null);
+    return;
+  }
+  const my = ++turn;
+  interrupt(false);
+  muted = false;
+  voice.setMuted(false);
+  log("user", `${{ ja: "Ja", nein: "Nein", entwurf: "Nur als Entwurf" }[id] || id} (getippt)`);
+  confirmPending(id === "nein" ? "no" : id === "entwurf" ? "draft" : "yes", my).catch((e) => report("confirm", e));
+}
+
+/** Eine Mail, die er lesen lässt, fasst das Gehirn zusammen – als Daten (Mac taint: nur SAFE_AFTER_MAIL, kein Lernen). */
+async function mailBrainTurn(mail, my, spoken) {
+  mailTaintConv = convId;
+  const body = String(mail.text || "").slice(0, MAIL_PROMPT_CHARS);
+  const prefix = `${L("mailSummary")}\nVon: ${mail.from}${mail.fromEmail ? ` <${mail.fromEmail}>` : ""}\n`
+    + `Betreff: ${mail.subject}\n${body}\n[Ende der Mail]`;
+  await brainTurn(L("mailTask"), my, spoken, { mail: true, mailPrefix: prefix });
+}
+
+/** Nach dem Neuladen: die letzte Stunde Gespräch (nur, wenn das Protokoll keinen Satz von dir oder Jarvis hat). */
+function restoreHistory() {
+  const at = safe(() => store.lastTurnAt(), 0);
+  if (!at || Date.now() - at > HISTORY_SHOW_MS) return;
+  const items = [];
+  for (const m of safe(() => store.chatHistory(), [])) {
+    let t = String(m.content || "");
+    if (m.role === "user") {
+      t = t.replace(/^\[Das hat [^\n]*\]\n/u, "").replace(/^\[Kontext:[^\n]*\]\n/u, "");
+      while (/^\s*\[[^\]]*\]\s*/u.test(t)) t = t.replace(/^\s*\[[^\]]*\]\s*/u, "");
+    } else {
+      t = safe(() => brain.parseActions(t).clean, t);
+    }
+    t = t.trim();
+    if (t) items.push({ who: m.role === "user" ? "user" : "jarvis", text: t, at });
+  }
+  safe(() => hud.restoreHistory(items.slice(-40)), false);
 }
 
 async function speakLine(key, my, vars = {}) {
@@ -457,6 +732,7 @@ function interrupt(restore = true) {
 }
 
 function stopAll() {
+  if (offer && !offer.heard) offer = null;                    // gestoppt, bevor die Frage kam: gilt nicht
   turn++;
   interrupt();
   setState("idle", "Bereit.");
@@ -482,6 +758,8 @@ function enterHidden({ fast = false, muted: m = false } = {}) {
   hud.setPaused(true);
   hud.hideImage();
   hud.hideModel();
+  hud.hideText();
+  clearPendingWrite();                                        // nicht sichtbar: kein „ja“ auf etwas, das man nicht sieht
   applyKeepAwake();
   syncHistory();
 }
@@ -493,6 +771,8 @@ function enterStealth({ silent = false } = {}) {
   voice.setMuted(true);
   hud.hideImage();
   hud.hideModel();
+  hud.hideText();
+  clearPendingWrite();
   hud.clearLinks();
   hud.setVisibility("stealth", { fast: true, hint: veilHint() });
   hud.setPaused(true);
@@ -549,7 +829,15 @@ function applyResult(r) {
   if (r.orb) {
     if (mode !== "shown") leaveHidden({ pop: true });
     if (r.orb.op === "reset") hud.orbReset();
+    else if (r.orb.op === "shape") hud.orbShape(r.orb.shape);
+    else if (r.orb.op === "form") hud.orbResetForm();
     else hud.orbZoom(r.orb.op);
+  }
+  if (r.text) {                                               // show_text: schwebender Text; leer = „Text weg“
+    if (String(r.text.text || "").trim()) {
+      if (mode !== "shown") leaveHidden({ pop: true });
+      hud.showText(r.text);
+    } else hud.hideText();
   }
   if (r.ui === "stealth") enterStealth();
   else if (r.ui === "hide") enterHidden({ muted: false });
@@ -578,7 +866,8 @@ function submitText(text, { spoken = false } = {}) {
   return handleText(t, { spoken }).catch((e) => report("handle", e));
 }
 
-async function handleText(text, { spoken = false, prehidden: ph = false } = {}) {
+async function handleText(text, { spoken = false, prehidden: ph = false, fromWindow = false, fromChat = false,
+  noWake = false, fromConfirm = false } = {}) {
   const my = ++turn;
   interrupt(false);
   activity();
@@ -589,21 +878,66 @@ async function handleText(text, { spoken = false, prehidden: ph = false } = {}) 
   heardAt = heardAt && Date.now() - heardAt < 5000 ? heardAt : Date.now();
   hook.heard.push(text);
   log("user", text);
+  // Plaudern/Nachhören ohne „Jarvis“ zählt mit; „Jarvis“ oder Tippen setzt zurück (Mac chat_turns)
+  chatTurns = fromChat || fromWindow || noWake ? chatTurns + 1 : 0;
+  // v4: „Soll ich … eintragen / abschicken?“ – nur seine eigene Antwort zählt; beim Plaudern ohne „Jarvis“ nie (Mac)
+  const pw = pendingFresh();
+  if (pw) {
+    const how = fromChat ? null : intents.confirmReply(text, pw.kind, pw.op, { strict: fromConfirm });
+    if (how) {
+      await confirmPending(how, my);
+      return;
+    }
+    if (fromConfirm) {                                        // im Nachhören: Fernseher, Nebengeräusch → Frage bleibt
+      if (ph && mode === "shown") hud.setVisibility("shown");
+      setState("idle", "Bereit.");
+      resumeIdle();
+      return;
+    }
+    clearPendingWrite();                                      // etwas anderes gesagt: Jarvis macht damit weiter
+  }
+  // im Nachhören nach „Soll ich …?“ zählt nur eine Antwort darauf (ja, nein, „stell lieber …“), kein Fernseher und
+  // kein Gesprächsfetzen. Der Vorschlag bleibt stehen: „Jarvis, ja“ geht weiter (Mac handle_text).
+  if (fromWindow && offer && !(mit.WINDOW_REPLY.test(mit.offerWords(text)) || mit.offerAnswer(text) !== null)) {
+    if (ph && mode === "shown") hud.setVisibility("shown");
+    setState("idle", "Bereit.");
+    resumeIdle();
+    return;
+  }
+  const reply = offerReply(text, fromWindow);
+  if (reply && reply.how === "ignore") {                       // unklar und ohne Weckwort: nichts tun, Vorschlag bleibt
+    offer = reply.offer;
+    if (ph && mode === "shown") hud.setVisibility("shown");
+    setState("idle", "Bereit.");
+    resumeIdle();
+    return;
+  }
   const s = S();
   const ready = brainReady();
-  let q = null;
-  try {
-    q = intents.quickIntent(text, {
-      lastAnswer, findShortcut: (t) => store.findShortcut(t), anrede: A(), wohnort: String(s.wohnort || ""),
-      imageOpen: hud.isImageOpen(), modelOpen: hud.isModelOpen(), timers: store.timers(), now: new Date(),
-      brain: ready, facts: () => store.facts(),
-    });
-  } catch (e) {
-    report("quickIntent", e);
-    q = null;
+  let q = null, offerDone = null, claudeOffer = null;
+  const quick = (say, actions = [], extra = {}) => ({ say, actions, followUp: false, special: null, ui: null, ...extra });
+  if (reply && reply.how === "no") q = quick(L("offerNo"));
+  else if (reply && reply.offer.kind === "closing") q = quick(L("closingYes"), [], { followUp: true, follow: { kind: "question" } });
+  else if (reply && reply.offer.actions[0]?.type === "claude") claudeOffer = reply.offer;   // den Schritt macht das Gehirn
+  else if (reply) {                                           // „ja“: Vorschlag sofort ausführen, ohne erneut zu fragen
+    offerDone = reply.offer;
+    const a = offerDone.actions[0];
+    q = quick(mit.offerConfirm(a, A()), offerDone.actions.map((x) => mit.offerRunAction(x)), { offerDone: true });
+  } else {
+    try {
+      q = intents.quickIntent(text, {
+        lastAnswer, findShortcut: (t) => store.findShortcut(t), anrede: A(), wohnort: String(s.wohnort || ""),
+        imageOpen: hud.isImageOpen(), modelOpen: hud.isModelOpen(), timers: store.timers(), now: new Date(),
+        brain: ready, facts: () => store.facts(),
+        google: { configured: safe(() => google.configured(), false) }, mailRead: !!safe(() => google.lastMail(), null),
+      });
+    } catch (e) {
+      report("quickIntent", e);
+      q = null;
+    }
   }
   if (q) {
-    await quickPath(q, text, my, ph);
+    await quickPath(q, text, my, ph, { reply, spoken });
     return;
   }
   if (ph && mode === "shown") hud.setVisibility("shown");     // geht ans Gehirn: die Antwort soll man sehen
@@ -611,10 +945,10 @@ async function handleText(text, { spoken = false, prehidden: ph = false } = {}) 
     await noBrainTurn(my);
     return;
   }
-  await brainTurn(text, my, spoken);
+  await brainTurn(text, my, spoken, { fromChat, claudeOffer });
 }
 
-async function quickPath(q, text, my, ph) {
+async function quickPath(q, text, my, ph, { reply = null, spoken = false } = {}) {
   const anrede = A();
   if (q.special === "stop") {
     if (ph && mode === "shown") hud.setVisibility("shown");
@@ -623,31 +957,56 @@ async function quickPath(q, text, my, ph) {
   }
   if (q.special === "reset") {
     safe(() => brain.reset(), null);
+    convId++;
+    offer = null;
+    offerNote = null;
     log("system", "Neues Gespräch gestartet.");
   }
   if (q.ui === "hide_fast" || q.ui === "hide") enterHidden({ fast: q.ui === "hide_fast", muted: false });
   if (q.special === "show") leaveHidden({ pop: true });
   const actions = Array.isArray(q.actions) ? q.actions : [];
   let answer = q.special === "repeat" ? (lastAnswer || L("repeatNothing")) : String(q.say || "");
-  if (actions.length && !answer.trimEnd().endsWith("?")) answer = intents.confirmText(actions, answer, anrede);
+  if (q.offerDone) { /* die Bestätigung kommt schon passend aus offerConfirm */ }
+  else if (actions.length && !answer.trimEnd().endsWith("?")) answer = intents.confirmText(actions, answer, anrede);
   const results = [];
+  let confirmReq = null, mailRes = null, fullRead = false, gNeed = null;
   if (actions.length) setState("thinking", "Einen Moment …");   // Wetter/Bild holen: nicht „BEREIT“, kein Timer dazwischen
   for (const a of actions) {
     const r = await run(a, ctx(false, text));
     if (my !== turn) return;
     results.push(r);
     applyResult(r);
-    if (r.say) answer = r.say;                                // Mac: das Problem/Ergebnis ersetzt die Bestätigung
+    if (r.confirm) confirmReq = r.confirm;
+    if (r.mail) { mailRes = r.mail; fullRead = !!r.full; }
+    if (r.googleNeed) gNeed = r.googleNeed;
+    // Mac: das Problem/Ergebnis ersetzt die Bestätigung; beim angenommenen Vorschlag kommt es dazu
+    if (r.say) answer = q.offerDone && answer ? `${answer} ${r.say}`.trim() : r.say;
   }
   if (my !== turn) return;
+  if (gNeed) offerGoogle(gNeed, { text });
+  if (confirmReq) setPendingWrite(confirmReq, my);
+  // „lies die Mail von …“ mit Gehirn: es fasst zusammen (die Mail steht im Textfeld); ohne Gehirn liest Jarvis den Anfang
+  if (mailRes && !fullRead && brainReady()) {
+    if (ph && mode === "shown") hud.setVisibility("shown");
+    await mailBrainTurn(mailRes, my, spoken);
+    return;
+  }
+  if (!reply && offerNote && offerNote.kind === "reply") offerNote = { ...offerNote, kind: "ignored" };  // etwas anderes gesagt
   const hid = !!q.ui || results.some((r) => r.ui === "stealth" || r.ui === "hide");
   if (ph && !hid && mode === "shown") hud.setVisibility("shown");   // live ausgeblendet, war aber kein Schließen
-  if (!hasStealth(actions)) answer = intents.withClosing(intents.bossOkay(answer, anrede), actions, store.closingPhrase());
+  let follow = q.follow || null;
+  if (!hasStealth(actions)) {
+    answer = intents.bossOkay(answer, anrede);
+    // „Sonst noch was?“ nach Schnellbefehlen nie (Mac: nur nach einer vorbereiteten Mail-Antwort, die es hier nicht gibt)
+    answer = addClosing(answer, actions, false, "de", my).text;
+  }
   if (answer) {
     log("jarvis", answer);
     lastAnswer = answer;
-    await speak(answer, my);
-    finishTurn(my, !!q.followUp);
+    if (!q.followUp && answer.endsWith("?") && S().followUpAfterAnswer) follow = { kind: "question" };
+    if (confirmReq) follow = S().followUpAfterOffer !== false ? { kind: "confirm", label: L("offerDetail") } : null;
+    await speak(answer, my, { full: fullRead });
+    finishTurn(my, !!q.followUp || !!follow, follow ? { label: L("chatDetail"), ...follow } : null);
   } else {
     setState("idle", actions.length ? "Erledigt." : "Bereit.");
     resumeIdle();
@@ -663,14 +1022,30 @@ async function noBrainTurn(my) {
   finishTurn(my, false);
 }
 
-async function brainTurn(text, my, spoken) {
+async function brainTurn(text, my, spoken, { fromChat = false, claudeOffer = null, mail = false, mailPrefix = "" } = {}) {
   const anrede = A();
   const prov = provider();
+  const said = mail ? "" : text;                              // seine eigenen Worte (Lernen, Smalltalk); Mail: keine
+  // Hinweise in eckigen Klammern: „ja“ auf eine freie Folgefrage (von Jarvis formuliert) bzw. was aus dem letzten
+  // Vorschlag wurde
+  let prefix = "";
+  if (mail) {
+    prefix = mailPrefix;
+    offerNote = null;
+  } else if (claudeOffer) {
+    prefix = mit.claudeTaskText(claudeOffer.question);
+    offerNote = null;
+  } else {
+    prefix = mit.offerNoteText(offerNote);
+    offerNote = null;
+  }
   setState("thinking", "Denke nach …");
   let res;
   try {
     res = await brain.ask(text, {
       spoken,
+      prefix,
+      chat: fromChat,
       signal: turnAbort.signal,
       onTier: (t) => { if (my === turn) hud.setTelemetry({ core: tierLabel(t) }); },
       onTool: (t) => {
@@ -696,6 +1071,11 @@ async function brainTurn(text, my, spoken) {
     return;
   }
   if (my !== turn || !res) return;
+  if (mail) {                                                 // Mail-Inhalt ist jetzt im Gespräch: nichts mehr lernen
+    safe(() => store.setConversationWebSeen(true), null);
+    mailTaintConv = convId;
+    res = { ...res, webSeen: true };
+  }
   if (authBad) {
     authBad = false;
     updateStatus();
@@ -708,68 +1088,156 @@ async function brainTurn(text, my, spoken) {
     return;
   }
   const raws = Array.isArray(res.actions) ? res.actions : [];
-  if (res.empty && !raws.length) {                            // Mac: nicht an Jarvis gerichtet
+  if (res.empty && !raws.length && !(res.offers || []).length) {   // Mac: nicht an Jarvis gerichtet (auch Fernseher beim Plaudern)
+    chatTurns = 0;
     setState("idle", "Bereit.");
     resumeIdle();
     return;
   }
-  const full = String(res.fullText || "").trim();
-  if (full) log("jarvis", full);
-  if (res.spokenText) lastAnswer = res.spokenText;
   // ---- Aktionen (Mac _think)
   const done = [], says = [];
   let problems = [];
-  let blocked = false, timerS = 0;
+  let blocked = false, blockedMail = false, timerS = 0;
+  let confirmReq = null, mailNext = null, gNeed = null;
+  const mailGuard = mail || mailTainted();                    // Mac SAFE_AFTER_MAIL: nach einer Mail nur Harmloses
   for (const raw of raws) {
     const a = safe(() => tools.normalizeAction(raw), null);
     if (!a) continue;
     if (res.webUsed && !tools.SAFE_AFTER_WEB.has(a.type)) { blocked = true; continue; }          // D15
-    if (tools.LEARN_ACTIONS.has(a.type) && (res.webSeen || !intents.LEARN_SIGNAL.test(text.toLowerCase()))) {
+    if (mailGuard && !tools.SAFE_AFTER_MAIL.has(a.type)) { blocked = true; blockedMail = true; continue; }
+    if (fromChat && NO_CHAT_ACTIONS.has(a.type)) {
+      if (!problems.includes(L("chatNoWrite"))) problems.push(L("chatNoWrite"));
+      continue;
+    }
+    if (tools.LEARN_ACTIONS.has(a.type) && (res.webSeen || !intents.LEARN_SIGNAL.test(said.toLowerCase()))) {
       problems.push(L("learnOnlyOwn"));                                                             // D18
       continue;
     }
-    const r = await run(a, ctx(true, text, !!res.webUsed, !!res.webSeen));
+    const r = await run(a, ctx(true, said, !!res.webUsed, !!res.webSeen));
     if (my !== turn) return;
     applyResult(r);
     done.push(a);
+    if (r.googleNeed) gNeed = r.googleNeed;
+    if (r.confirm) {                                          // eintragen/senden erst nach seinem „ja“
+      confirmReq = r.confirm;
+      continue;
+    }
+    if (r.mail && !r.full && !mail && brainReady()) {         // Mail geholt: gleich zusammenfassen lassen
+      mailNext = r.mail;
+      continue;
+    }
     if (r.say) (SAY_TYPES.has(r.type || a.type) ? says : problems).push(r.say);
     if (a.type === "timer" && r.ok && r.timer) timerS = Number(r.timer.seconds) || 0;
   }
   if (my !== turn) return;
+  if (gNeed) offerGoogle(gNeed, { text: said });
+  if (confirmReq) setPendingWrite(confirmReq, my);
+  // ---- Mitdenken: VORSCHLAG / NACHFRAGE (nie vorgelesen); die Frage am Ende wartet unausgesprochen in tailQuestion
+  const tainted = !!(res.webUsed || res.webSeen || mailGuard || (claudeOffer && claudeOffer.tainted));
+  let pend = String(res.tailQuestion || "").trim();
+  const [, tq] = intents.splitTailQuestion(pend);
+  if (tq && mit.OFFER_FLOSKEL.test(tq)) pend = intents.dropLastQuestion(pend);   // genau die Floskel, die keiner will
+  if (confirmReq && tq) pend = intents.dropLastQuestion(pend);                     // die Frage stellt Jarvis selbst
+  let newOffer = null;
+  const offers = Array.isArray(res.offers) ? res.offers : [];
+  if (offers.length) {
+    let made;
+    try {
+      made = mit.makeOffer(offers, pend, tainted, { timers: store.timers(), now: new Date() });
+    } catch (e) {
+      made = { offer: null, spoken: intents.dropLastQuestion(pend), why: String(e) };
+    }
+    newOffer = made.offer;
+    pend = made.spoken;
+    const real = problems.filter((p) => !String(p).startsWith("Okay"));
+    const same = newOffer && done.some((a) => a.type === newOffer.actions[0].type);
+    if (newOffer && (blocked || real.length || same || confirmReq || mailNext || S().proactiveOffers === false
+      || (mit.offersPaused(offerHist) && newOffer.actions[0].type !== "mail_reply")
+      || (res.level === "einfach" && !claudeOffer && !tainted))) {
+      newOffer = null;
+      pend = intents.dropLastQuestion(pend);                  // passt gerade nicht: die Frage auch nicht stellen
+    }
+  }
+  const spokenAll = `${String(res.spokenText || "")} ${pend}`.trim();
   let extra = "";
-  if (res.spokenText) problems = problems.filter((p) => !String(p).startsWith("Okay"));
+  if (spokenAll) problems = problems.filter((p) => !String(p).startsWith("Okay"));
   else if (done.length && !problems.length && !says.length) extra = intents.confirmText(done, "", anrede);
-  if (!res.spokenText && !extra && timerS) {
+  if (!spokenAll && !extra && timerS) {
     const end = new Date(Date.now() + timerS * 1000);
     extra = timerS > 3600 ? L("alarmSet", { h: end.getHours(), mm: pad2(end.getMinutes()) })
       : L("timerSet", { dauer: intents.sayDuration(timerS) });
   }
-  if (blocked) problems.push(L("blockedAfterWeb"));
+  if (blocked) problems.push(L(blockedMail ? "blockedAfterMail" : "blockedAfterWeb"));
+  if (confirmReq && !spokenAll) extra = "";                   // „Okay, Boss, …“ passt nicht vor eine Frage
   extra = [extra, ...says, ...problems].filter(Boolean).join(" ");
-  let tail = extra ? intents.bossOkay(extra, anrede) : "";
-  const closing = done.length && !hasStealth(done) ? store.closingPhrase() : "";
-  const all = `${String(res.spokenText || "")} ${tail}`.trim();
-  if (closing && all && !all.endsWith("?") && !all.includes(closing)
-    && !done.some((a) => intents.CLOSING_EXCLUDED.has(a.type))) tail = `${tail} ${closing}`.trim();
-  if (tail) {
-    log("jarvis", tail);
-    if (!res.spokenText) lastAnswer = tail;
-    if (!muted && my !== mutedTurn) {
-      const s = S();
-      const t = intents.voiceText(tail, { maxSentences: s.speakMaxSentences, maxChars: s.speakMaxChars, closing });
-      expectSpeech = my;
-      voice.say(t);
-      hook.spoken.push(t);
+  let tail = [pend, extra ? intents.bossOkay(extra, anrede) : "", confirmReq ? confirmReq.question : ""].filter(Boolean).join(" ");
+  if (newOffer) setOffer(newOffer, my);
+  // „Sonst noch was?“ nur, wenn das Gehirn den Ablauf für fertig hält (NACHFRAGE: ja), auf Deutsch, alle 10 min
+  let closedOffer = false;
+  if ((done.length || res.nachfrage) && !hasStealth(done) && !confirmReq && !mailNext) {
+    const lang = safe(() => (brain.looksEnglish(said) ? "en" : "de"), "de");
+    const full = `${String(res.spokenText || "")} ${tail}`.trim();
+    const allow = !newOffer && !problems.length && !!res.nachfrage;
+    const c = addClosing(full, done, allow, lang, my);
+    if (c.closing) {
+      tail = `${tail} ${c.closing}`.trim();
+      closedOffer = true;
     }
   }
+  // Protokoll: der ganze Text, aber die Frage am Ende so, wie sie wirklich gesagt wird (verworfen = weg, nach Webinhalten
+  // Jarvis' eigene Frage; Mac: emit answer = gesprochener Text)
+  let base = String(res.fullText || "").trim();
+  const held = String(res.tailQuestion || "").trim();
+  if (held) {
+    const flat = base.replace(/\s+/g, " ");
+    base = flat.endsWith(held) ? flat.slice(0, -held.length).trim() : intents.dropLastQuestion(base);
+  }
+  const logText = `${base} ${tail}`.trim();
+  if (logText) log("jarvis", logText);
+  const answerText = `${String(res.spokenText || "")} ${tail}`.trim();
+  if (answerText) lastAnswer = answerText;
+  if (tail && !muted && my !== mutedTurn) {
+    const s = S();
+    const t = intents.voiceText(tail, { maxSentences: s.speakMaxSentences, maxChars: s.speakMaxChars,
+      closing: closedOffer ? offer?.question || "" : "", offer: !!newOffer });
+    expectSpeech = my;
+    voice.say(t);
+    hook.spoken.push(t);
+  }
   if (hasStealth(done)) return;                               // enterStealth hat schon alles beendet
-  if (!res.spokenText && !tail) {
+  if (mailNext) {                                             // erst das Gesagte, dann die Zusammenfassung der Mail
+    if (answerText) await voice.done();
+    if (my !== turn) return;
+    await mailBrainTurn(mailNext, my, spoken);
+    return;
+  }
+  if (!answerText) {
+    chatTurns = 0;
     setState("idle", done.length ? "Erledigt." : "Bereit.");
     resumeIdle();
     return;
   }
   await voice.done();
-  finishTurn(my, false);                                      // follow_up_after_answer = false (Mac config)
+  if (my !== turn) return;
+  markOfferHeard(my);
+  if (confirmReq) {                                           // „Soll ich … eintragen?“: kurz nachhören, „ja“ reicht
+    finishTurn(my, S().followUpAfterOffer !== false, { kind: "confirm", label: L("offerDetail") });
+    return;
+  }
+  // Nachhören (Mac 12./13.10.): nach erledigten Befehlen nicht; nach einem konkreten Vorschlag und nach einer echten
+  // Rückfrage ein paar Sekunden, damit „ja“ reicht. Plaudern: ohne „Jarvis“ weiter zuhören, solange nur geredet wird.
+  const s = S();
+  const asks = answerText.endsWith("?");
+  const talk = !!res.plaudern || (!res.webUsed && (intents.isSmalltalk(said) || (fromChat && asks)));
+  const capped = chatTurns >= CHAT_MAX_TURNS;                 // 10 Sätze am Stück ohne „Jarvis“: jetzt wieder mit Namen
+  const chat = s.followUpSmalltalk !== false && !newOffer && !closedOffer && !done.length && !problems.length
+    && !blocked && !(claudeOffer && claudeOffer.tainted) && !claudeOffer && talk && !capped;
+  const fu = chat || (!capped && asks && (!!s.followUpAfterAnswer
+    || (!!newOffer && newOffer.window && s.followUpAfterOffer !== false)
+    || (!newOffer && !closedOffer && !done.length && !problems.length && !tainted && s.followUpAfterQuestion !== false)));
+  const follow = !fu ? null : chat ? { kind: "chat", label: L("chatDetail"), seconds: Number(s.smalltalkFollowSeconds) || 6 }
+    : newOffer ? { kind: "offer", label: L("offerDetail"), offer } : { kind: "question", label: L("chatDetail") };
+  finishTurn(my, fu, follow);
 }
 
 async function errorTurn(e, my, prov) {
@@ -789,9 +1257,10 @@ async function errorTurn(e, my, prov) {
 }
 
 // ---------------------------------------------------------------- Zuhören (§4.4, §4.5)
-function listen({ followUp: fu = false, fromTap = false } = {}) {
+function listen({ followUp: fu = false, fromTap = false, follow = null } = {}) {
   interrupt();
   const my = ++turn;
+  followInfo = fu ? (follow || { kind: "plain" }) : null;
   muted = false;
   voice.setMuted(false);
   activity();
@@ -815,20 +1284,20 @@ function listen({ followUp: fu = false, fromTap = false } = {}) {
   if (!fu) voice.chime("wake");
   let l;
   try {
-    l = ears.listen({ followUp: fu });
+    l = ears.listen({ followUp: fu, seconds: fu && follow?.seconds ? follow.seconds : 0 });
   } catch (e) {
     report("listen", e);
     keyboardFallback(fromTap);
     return;
   }
-  runListening(l, { followUp: fu }, my).catch((e) => report("listening", e));
+  runListening(l, { followUp: fu, follow: followInfo }, my).catch((e) => report("listening", e));
 }
 
-async function runListening(l, { followUp: fu = false } = {}, my = turn) {
+async function runListening(l, { followUp: fu = false, follow = null } = {}, my = turn) {
   listening = l;
   prehidden = false;
   heardPartial = false;
-  setState("listening", fu ? L("followUpDetail") : "Ich höre zu …", { soft: fu });
+  setState("listening", fu ? (follow?.label || L("followUpDetail")) : "Ich höre zu …", { soft: fu });
   hud.pauseImage(true);
   imagePausedBy = l;
   let res;
@@ -843,6 +1312,7 @@ async function runListening(l, { followUp: fu = false } = {}, my = turn) {
     imagePausedBy = null;
     hud.pauseImage(false);
   }
+  if (followInfo === follow) followInfo = null;
   if (my !== turn) return;
   if (listening === l) listening = null;
   hud.setLive(null);
@@ -866,7 +1336,8 @@ async function runListening(l, { followUp: fu = false } = {}, my = turn) {
     resumeIdle();
     return;
   }
-  const text = intents.cleanTranscript(intents.stripWakePrefix(raw));
+  const stripped = intents.stripWakePrefix(raw);
+  const text = intents.cleanTranscript(stripped);
   if (text.replace(/[^\p{L}\p{N}]/gu, "").length < 2) {
     if (ph && mode === "shown") hud.setVisibility("shown");
     setState("idle", "Nicht verstanden.");
@@ -875,7 +1346,13 @@ async function runListening(l, { followUp: fu = false } = {}, my = turn) {
   }
   voice.chime("done");
   heardAt = Date.now();
-  await handleText(text, { spoken: true, prehidden: ph });
+  // „Jarvis, …“ im Nachhören: ein normaler Befehl, kein Nebengeräusch (Mac _transcribe)
+  const hadWake = String(stripped).trim().length < String(raw).trim().length;
+  const fromFollow = fu && !hadWake;
+  const kind = follow?.kind || "plain";
+  await handleText(text, { spoken: true, prehidden: ph, noWake: fromFollow,
+    fromWindow: fromFollow && kind === "offer" && !!offer && offer === follow?.offer,
+    fromChat: fromFollow && kind === "chat", fromConfirm: fromFollow && kind === "confirm" });
 }
 
 async function sayPresence({ followUp: fu = false } = {}) {
@@ -1201,7 +1678,10 @@ function handleDue(due, now, alive = false) {
   for (const t of due) {
     const late = now - Number(t.ends);
     const ranOut = alive && Number(t.ends) >= PAGE_START;     // abgelaufen, während diese Seite schon lief
-    if (late <= TIMER_LATE_MS || (ranOut && late <= TIMER_ALIVE_GAP_MS)) announce(L("timerDone", { label: t.label }));
+    // Erinnerung (Mitdenken, „at“): „Boss, Erinnerung: Zahnarzt um 10.“ wie am Mac
+    if (late <= TIMER_LATE_MS || (ranOut && late <= TIMER_ALIVE_GAP_MS)) {
+      announce(t.reminder ? L("reminderDone", { label: t.label || "Erinnerung" }) : L("timerDone", { label: t.label }));
+    }
     else if (late <= TIMER_MISSED_MS) missed.push(t);
     // länger her: still verwerfen (live Mac Timers.restore)
   }
@@ -1233,6 +1713,7 @@ async function doAnnounce(text) {
   }
   interrupt();
   const my = ++turn;
+  offer = null;                                               // „Jarvis, okay“ auf den Timer löst keinen alten Vorschlag aus
   if (mode !== "shown") leaveHidden({ pop: true });
   muted = false;
   voice.setMuted(false);
@@ -1253,6 +1734,7 @@ function tick() {
   safe(() => hud.renderTimers(store.timers(), now), null);
   if (due.length) handleDue(due, now, alive);
   syncHistory();
+  if (booted && document.visibilityState !== "hidden") refreshGoogleTermine();   // alle 10 min, nur mit gültigem Zugang
   const s = S();
   if (state === "idle" && !voice.isSpeaking() && !listening) {
     const quiet = now - lastActivity;
@@ -1292,6 +1774,13 @@ function applySettings(next) {
     }
   }
   if (ch("wakeWord") || ch("keepAwake")) applyKeepAwake();
+  if (ch("googleClientId")) {
+    googleTermineAt = 0;
+    afterConnect = null;
+    if (!String(next.googleClientId || "")) safe(() => google.forget(), null);
+    else safe(() => google.preload(), null);
+    onGoogleChange(safe(() => google.status(), null));
+  }
   if (["anthropicKey", "geminiKey", "brainProvider", "azureKey", "wakeWord"].some(ch)) {
     if (ch("anthropicKey") || ch("geminiKey") || ch("brainProvider")) authBad = false;
     updateStatus();
@@ -1344,6 +1833,9 @@ function onCommand(cmd) {
       break;
     case "new_session":
       safe(() => brain.reset(), null);
+      convId++;
+      offer = null;
+      offerNote = null;
       log("system", "Neues Gespräch gestartet.");
       break;
     case "wake":
@@ -1397,6 +1889,9 @@ function onSheetCommand(cmd, detail = {}) {
       return voice.test(L("voiceTest", { greeting: greetingWord() }), detail?.draft || {}).catch((e) => report("voice test", e));
     case "history_clear":
       safe(() => brain.reset(), null);
+      convId++;
+      offer = null;
+      offerNote = null;
       log("system", "Neues Gespräch gestartet.");
       return undefined;
     case "log_clear":
@@ -1413,14 +1908,127 @@ function onSheetCommand(cmd, detail = {}) {
       return undefined;
     case "wipe_done":
       return undefined;
+    // ---- „Jarvis einrichten“ (v4): jeder Schritt synchron im Tippen
+    case "wz_mic":
+      return wizardMic();
+    case "wz_awake":
+      return wizardAwake();
+    case "wz_voice":
+      return wizardVoice();
+    case "wz_finish":
+      finishSetup({ background: !!detail?.background, how: "done" });
+      return undefined;
+    case "wz_closed":
+      finishSetup({ background: false, how: "skipped" });
+      return undefined;
+    // ---- Google verbinden (v4)
+    case "google_connect":
+      return googleConnectTap(!!detail?.mail);
+    case "google_disconnect":
+      safe(() => google.disconnect(), null);
+      safe(() => hud.setExternalTermine([]), null);
+      googleTermineAt = 0;
+      log("system", "Google getrennt.");
+      updateStatus();
+      return undefined;
+    case "google_preload":
+      safe(() => google.preload({ force: true }), null);
+      return undefined;
     default:
       return undefined;
   }
 }
 
+// ---------------------------------------------------------------- „Jarvis einrichten“ (v4, erster Besuch)
+function wizardMic() {
+  if (!safe(() => ears.capabilities().native, false)) return Promise.resolve({ ok: false, text: L("noListen") });
+  gestureBasics();
+  if (locked.audio || !voice.isUnlocked()) voice.unlockInGesture().then((ok) => { if (ok) locked.audio = false; }, () => {});
+  return ears.unlockInGesture().then((ok) => {
+    if (ok) {
+      locked.mic = false;
+      micRetryFailed = false;
+      return { ok: true, text: "Mikrofon erlaubt ✓" };
+    }
+    const why = safe(() => ears.blockReason(), null);
+    return { ok: false, text: why === "service" ? L(isIOS() ? "speechOff" : "speechOffWeb") : L(isIOS() ? "micDenied" : "micDeniedWeb") };
+  }, () => ({ ok: false, text: L(isIOS() ? "micDenied" : "micDeniedWeb") }));
+}
+
+function wizardAwake() {
+  safe(() => awake.inGesture(true), null);                   // Sperre mit Nutzeraktivierung (iOS: nur im Tippen)
+  if (!S().keepAwake) safe(() => store.setSettings({ keepAwake: true }), null);
+  return sleep(350).then(() => {
+    const m = safe(() => awake.method(), "none");
+    if (m === "wakelock" || m === "video") return { ok: true, text: "Der Bildschirm bleibt an, solange ich lausche ✓" };
+    return { ok: false, text: "Das kann dieser Browser nicht selbst. Stell die automatische Sperre in den Einstellungen deines Geräts länger." };
+  });
+}
+
+function wizardVoice() {
+  muted = false;
+  voice.setMuted(false);
+  const a = voice.unlockInGesture();                         // Ton und Gerätestimme im Tippen freischalten (iOS)
+  const t = L("voiceTest", { greeting: greetingWord() });
+  const p = voice.test(t, {});
+  return Promise.all([a.catch(() => false), p.catch(() => null)]).then(([ok]) => {
+    locked.audio = !ok;
+    return { ok: true, text: "Hast du mich gehört? Wenn nicht: Lautstärke hoch und den Stumm-Schalter prüfen." };
+  });
+}
+
+/**
+ * „Los geht's“ (how "done") oder ✕ (how "skipped"): merken, im Tippen Ton/Mikrofon/Wachhalten holen und starten –
+ * mit background still im Hintergrund (auch bei jedem späteren Start), sonst normal.
+ */
+function finishSetup({ background = false, how = "done" } = {}) {
+  const wasBoot = setupActive;
+  if (!wasBoot && how === "skipped") return;                 // aus den Einstellungen geöffnet und wieder zu: nichts ändern
+  setupActive = false;
+  safe(() => store.markSetupDone(how), null);
+  if (how === "done") safe(() => store.setSettings({ startInBackground: !!background }), null);
+  const s = S();
+  gestureNow = true;                                          // synchron im Tippen
+  try {
+    safe(() => voice.primeInGesture(), null);
+    if (locked.audio || !voice.isUnlocked()) {
+      voice.unlockInGesture().then((ok) => { if (ok) locked.audio = false; }, () => {});
+    }
+    if (s.keepAwake && s.wakeWord) safe(() => awake.inGesture(true), null);
+    if (s.wakeWord && safe(() => ears.micPermission(), null) !== "denied") startWake(true);
+  } finally {
+    gestureNow = false;
+  }
+  if (!wasBoot) {                                             // aus den Einstellungen nochmal durchlaufen
+    if (how === "done" && background) {
+      const my = ++turn;
+      speakThen(L("setupDone"), my, () => enterStealth({ silent: true }));
+    }
+    return;
+  }
+  if (how === "done" && background) {
+    const my = ++turn;
+    booted = true;
+    setState("idle", "Bereit.");
+    speakThen(L("setupDone"), my, () => continueBoot("background"));
+    return;
+  }
+  continueBoot(how === "done" ? "setup" : "normal");
+}
+
+/** Satz sagen (sichtbar im Protokoll), danach then() – auch wenn der Ton gesperrt bleibt. */
+function speakThen(text, my, then) {
+  log("jarvis", text);
+  lastAnswer = text;
+  const done = () => { if (my === turn) then(); };
+  Promise.race([speak(text, my), sleep(12000)]).then(done, done);
+}
+
 // ---------------------------------------------------------------- hud-Rückrufe
 const hudCallbacks = {
   onOrbTap: orbTap,
+  // Antippen, das sofort im Finger laufen muss: ohne Spracherkennung öffnet es die Tastatur (iOS nur im Tippen)
+  orbTapNow: () => safe(() => ears.engine(), "keyboard") === "keyboard",
   onCommand,
   onTimerCancel(id) {
     safe(() => store.cancelTimers(id), null);
@@ -1450,7 +2058,12 @@ const hudCallbacks = {
   },
   onLinkTap(link) {
     activity();
-    if (link && link.url === SETUP_HREF) sheets.open("setup", { section: "brain" });
+    const url = String(link?.url || "");
+    if (url === SETUP_HREF) sheets.open("setup", { section: "brain" });
+    else if (url === GOOGLE_SETUP_HREF) sheets.open("setup", { section: "google" });
+    else if (url === GOOGLE_HREF || url === GMAIL_HREF) {
+      googleConnectTap(url === GMAIL_HREF).then((r) => { if (!r.ok && r.text) hud.toast(r.text, 4000); });
+    } else if (url.startsWith(CONFIRM_HREF)) confirmTap(url.slice(CONFIRM_HREF.length));
   },
   onDeckPage(index) {
     if (Number.isInteger(index)) safe(() => store.setSettings({ deckPage: index }), null);
@@ -1484,6 +2097,7 @@ const sheetCallbacks = {
       wakeState: wakeLabel(safe(() => ears.wakeState(), "off")),
       standalone: isStandalone(),
       provider: provider(),
+      google: safe(() => google.status(), null),
     };
   },
   toast(text) {
@@ -1576,7 +2190,7 @@ function onKeyDown(e) {
 // ⚙-Knopf aus dem Gratis-Hinweis: kein Seitenwechsel, sondern das Einstellungsblatt
 function onSetupLinkClick(e) {
   const a = e.target?.closest?.("#actionbar a");
-  if (a && a.getAttribute("href") === SETUP_HREF) e.preventDefault();
+  if (a && /^#jarvis-/.test(a.getAttribute("href") || "")) e.preventDefault();   // interne Knöpfe öffnen nichts
 }
 
 function onStoreTopics() {
@@ -1627,6 +2241,10 @@ function continueBoot(reason) {
     setState("idle", "Bereit.");
     enterStealth({ silent: true });
     log("system", "Hintergrund-Modus: lausche unsichtbar auf „Jarvis“.");
+  } else if (reason === "setup") {                            // eingerichtet, aber sichtbar bleiben
+    setState("idle", LM(wakeAvailable() ? "idleBoot" : "idleBootNoWake"));
+    const my = ++turn;
+    speakThen(L("setupDoneShown"), my, () => finishTurn(my, false));
   } else {
     const wakeOk = wakeAvailable();                           // Firefox, Mikrofon gesperrt: kein „Sag Hey Jarvis“
     setState("idle", LM(wakeOk ? "idleBoot" : "idleBootNoWake"));
@@ -1656,6 +2274,7 @@ async function init() {
   hud.setTheme(s.theme);
   hud.setBrand({ firma: s.firma, wohnort: s.wohnort, galaxyBrightness: s.galaxyBrightness, vorname: s.vorname });
   hud.restoreLog(store.logEntries());
+  restoreHistory();
   hud.renderTimers(store.timers());
   hud.renderKonto(store.konto());
   hud.renderTermine(store.konto());
@@ -1667,6 +2286,7 @@ async function init() {
   rm?.addEventListener?.("change", (ev) => hud.setReducedMotion(!!ev.matches));
 
   sheets.init(sheetCallbacks);
+  google.init({ onChange: onGoogleChange });
   intents.setDevice?.(deviceNoun());
   voice.init({ settings: () => store.settings() });
   ears.init(earHandlers, { settings: () => store.settings(), audioContext: () => voice.audioContext() });
@@ -1692,6 +2312,9 @@ async function init() {
   // „Beim Öffnen zuhören“ gilt auch beim Kaltstart (iOS beendet die Home-Bildschirm-App oft im Hintergrund)
   bootReason = importPending ? "normal"
     : imp.wake || WAKE_PARAM || s.listenOnOpen ? "wake" : s.startInBackground ? "background" : "normal";
+  // v4: erster Besuch → „Jarvis einrichten“ (nicht bei ?wake=1 aus dem Kurzbefehl und nicht, solange ein Setup-Link fragt)
+  const firstRun = !importPending && bootReason !== "wake" && !safe(() => store.setupDone(), true);
+  if (firstRun) bootReason = "normal";
   if (bootReason === "normal") {
     hud.showBoot("SYSTEME WERDEN HOCHGEFAHREN …");
     setTimeout(() => {
@@ -1702,6 +2325,17 @@ async function init() {
   setState("loading", "Systeme werden hochgefahren …");
   hud.start();
   updateStatus();
+  refreshGoogleTermine(true);                                 // Zugang aus dieser Sitzung noch gültig: Termine ins Panel
+  if (firstRun) {
+    // Jeder Schritt des Assistenten holt sich seine Erlaubnis selbst im Tippen; kein Fänger, kein Weckwort davor
+    setupActive = true;
+    locked.audio = !(await voice.tryAutoUnlock().catch(() => false));
+    locked.mic = !!(s.wakeWord && safe(() => ears.capabilities().native, false));
+    setState("idle", "Einrichten …");
+    updateStatus();
+    sheets.open("welcome", { step: 0 });
+    return;
+  }
   installUnlockListeners();                                   // jedes erste Tippen schaltet frei (§4.3)
 
   locked.audio = !(await voice.tryAutoUnlock().catch(() => false));

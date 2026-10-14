@@ -5,6 +5,8 @@
 // (neuro.js), window.Galaxy (galaxy.js) und window.Model3D (model3d.js). Port der Darstellungsteile von ui/app.js am
 // Mac (setState, renderWorld, renderCalendar, renderTimers, drawSpark, drawRing, renderIncome, renderTermine,
 // renderMarkets, setPaused, tick, setFocus, Bild-Timer, Kugel greifen und zoomen).
+// v4: setExternalTermine(list) merges Google events ({ title, start: Date, allDay, location }) into TERMINE;
+// showLink(link) takes link.cls ("yes" | "no" | "google") and link.ms (how long it stays); dropLinks(prefix).
 import { WEEKDAYS, MONTHS } from "./intents.js";
 
 const $ = (id) => document.getElementById(id);
@@ -150,13 +152,14 @@ export function init(callbacks = {}) {
 
   loadOrb();
   bindImage();
+  bindLog();
   bindStage();
   bindControls();
   bindDeck();
   bindVeil();
   bindKeyboard();
   sizeStage();
-  if (window.ResizeObserver) new ResizeObserver(() => sizeStage()).observe($("stage-wrap"));
+  if (window.ResizeObserver) new ResizeObserver(() => { sizeStage(); fitText(); }).observe($("stage-wrap"));
   window.addEventListener("resize", () => { sizeStage(); alignDeck(); updateKeyboard(); });
   window.addEventListener("orientationchange", () => setTimeout(() => { sizeStage(); alignDeck(); }, 250));
   window.addEventListener("online", () => setOnline(true));
@@ -167,7 +170,7 @@ export function init(callbacks = {}) {
   const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
   mq?.addEventListener?.("change", () => setReducedMotion(mq.matches));
   setOnline(navigator.onLine !== false);
-  try { document.fonts?.ready?.then(() => { fitPlaceholder(); updateMore(); }); } catch { /* ignore */ }
+  try { document.fonts?.ready?.then(() => { sizeStage(); fitPlaceholder(); updateMore(); fitText(); }); } catch { /* ignore */ }
   renderWorld(new Date());
   renderCalendar(new Date());
   renderKonto(null);
@@ -211,7 +214,8 @@ export function setBrand({ firma, wohnort, galaxyBrightness, vorname: vn } = {})
     renderWorld(new Date());
   }
   if (galaxyBrightness !== undefined && galaxyBrightness !== null && Number.isFinite(Number(galaxyBrightness))) {
-    root.style.setProperty("--galaxy", String(clamp(Number(galaxyBrightness), 0, 1)));
+    // eigene Variable: --galaxy gehört der Kugel (wie weit sie zur Milchstraße aufgezogen ist, neuro.js)
+    root.style.setProperty("--galaxy-bright", String(clamp(Number(galaxyBrightness), 0, 1)));
   }
   if (vn !== undefined) vorname = String(vn || "").trim();
 }
@@ -355,10 +359,20 @@ function logRow(kind, text, at) {
   return row;
 }
 
+// Der neueste Satz von dir oder Jarvis steht voll da und hervorgehoben; ältere Einträge sind gekürzt (style.css)
+function markNewest() {
+  const box = $("log");
+  const rows = [...box.querySelectorAll(".entry.jarvis, .entry.user, .entry.error, .entry.draft")];
+  const last = rows[rows.length - 1] || null;
+  for (const r of box.querySelectorAll(".entry.newest")) if (r !== last) r.classList.remove("newest");
+  if (last) last.classList.add("newest");
+}
+
 export function log(kind, text, at = Date.now()) {
   const box = $("log");
   box.appendChild(logRow(kind, text, at));
   while (box.children.length > MAX_LOG) box.firstChild.remove();
+  markNewest();
   logStick = true;
   logToEnd();
   if (page !== LOG_PAGE && pagedDeck()) dotButtons()[LOG_PAGE]?.classList.add("badge");
@@ -389,6 +403,16 @@ function updateMore() {
   if (deck.classList.contains("more") !== more) deck.classList.toggle("more", more);
 }
 
+// Ältere Einträge sind auf drei Zeilen gekürzt: Antippen zeigt sie ganz (und wieder kurz)
+function bindLog() {
+  $("log").addEventListener("click", (e) => {
+    const en = e.target.closest?.(".entry");
+    if (!en || en.classList.contains("newest") || en === $("log").lastElementChild) return;
+    if (String(window.getSelection?.() || "").trim()) return;   // Text markiert: nicht umklappen
+    en.classList.toggle("open");
+  });
+}
+
 export function restoreLog(entries) {
   const list = Array.isArray(entries) ? entries.slice(-MAX_LOG) : [];
   const rows = list.filter((e) => e && typeof e === "object").map((e) => {
@@ -397,8 +421,32 @@ export function restoreLog(entries) {
     return r;
   });
   $("log").replaceChildren(...rows);
+  markNewest();
   logStick = true;
   logToEnd();
+}
+
+/**
+ * Nach dem Neuladen die letzte Stunde Gespräch zeigen (Mac „history“, 13.10. abends) – nur, wenn im Protokoll noch
+ * kein Satz von dir oder Jarvis steht (z. B. nach „Protokoll leeren“). Nur Anzeige, nichts wird gespeichert.
+ * @param {{ who: "user"|"jarvis", text: string, at?: number }[]} items
+ * @returns {boolean} true = angezeigt
+ */
+export function restoreHistory(items) {
+  const box = $("log");
+  if (box.querySelector(".entry.user, .entry.jarvis")) return false;
+  const list = (Array.isArray(items) ? items : []).filter((e) => e && String(e.text || "").trim()).slice(-40);
+  if (!list.length) return false;
+  for (const e of list) {
+    const r = logRow(e.who === "user" ? "user" : "jarvis", String(e.text).trim(), e.at);
+    r.style.animation = "none";
+    box.appendChild(r);
+  }
+  while (box.children.length > MAX_LOG) box.firstChild.remove();
+  markNewest();
+  logStick = true;
+  logToEnd();
+  return true;
 }
 
 // ================================================================ Timer (Mac renderTimers, in place: Bug 4)
@@ -699,12 +747,24 @@ export function renderTermine(konto, now = new Date()) {
   renderTermineList(now instanceof Date ? now : new Date(now));
 }
 
+// v4: Termine aus dem Google-Kalender (app.js lädt sie über google.js), gemischt mit der Jarvis-Liste
+let extTermine = [];
+export function setExternalTermine(list, now = new Date()) {
+  extTermine = (Array.isArray(list) ? list : []).filter((e) => e && e.start instanceof Date && !isNaN(e.start))
+    .map((e) => ({ titel: String(e.title || "Termin"), ort: String(e.location || ""), at: new Date(e.start.getTime()),
+      allDay: !!e.allDay, google: true }));
+  renderTermineList(now instanceof Date ? now : new Date(now));
+}
+
 function renderTermineList(now) {
   const income = kontoData;
-  const list = (income && Array.isArray(income.termine) ? income.termine : [])
+  const own = (income && Array.isArray(income.termine) ? income.termine : [])
     .filter((t) => t && typeof t === "object")
-    .map((t) => ({ ...t, at: new Date(t.wann), allDay: !String(t.wann).includes("T") }))
-    .filter((t) => !isNaN(t.at) && (t.allDay ? t.at.setHours(23, 59) : t.at) >= now - 3600e3)
+    .map((t) => ({ ...t, at: new Date(t.wann), allDay: !String(t.wann).includes("T") }));
+  const seen = new Set(extTermine.map((t) => `${t.titel.toLowerCase()}|${t.at.getTime()}`));
+  const list = [...extTermine.map((t) => ({ ...t, at: new Date(t.at.getTime()) })),
+    ...own.filter((t) => !seen.has(`${String(t.titel || "").toLowerCase()}|${t.at.getTime()}`))]
+    .filter((t) => !isNaN(t.at) && (t.allDay ? new Date(t.at.getTime()).setHours(23, 59) : t.at) >= now - 3600e3)
     .sort((a, b) => a.at - b.at).slice(0, 3);
   const hints = income && Array.isArray(income.hinweise) ? income.hinweise.slice(0, 2) : [];
   const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -713,7 +773,7 @@ function renderTermineList(now) {
     const days = Math.round((d - day0) / 86400e3);
     const when = days === 0 ? "HEUTE" : days === 1 ? "MORGEN" : `${WD[t.at.getDay()].toUpperCase()} ${t.at.getDate()}.${t.at.getMonth() + 1}.`;
     const time = t.allDay ? "GANZTÄGIG" : `${pad(t.at.getHours())}:${pad(t.at.getMinutes())}`;
-    const r = el("div", "ev" + (i ? " b2" : ""));
+    const r = el("div", "ev" + (i ? " b2" : "") + (t.google ? " g" : ""));
     const txt = el("div", "tx");
     txt.append(el("span", "when", `${when} · ${time}`), el("span", "what", t.titel || "Termin"));
     if (t.ort) txt.append(el("span", "where", t.ort));
@@ -1026,15 +1086,17 @@ export function showLink(link) {
   const old = links.find((l) => l.link.url === link.url);
   if (old) removeLink(old);
   while (links.length >= MAX_LINKS) removeLink(links[0]);
-  const a = el("a", "act", `${link.icon || "↗"} ${cutLabel(link.label || link.url)}`);
+  const a = el("a", `act${link.cls ? ` ${link.cls}` : ""}`, `${link.icon || "↗"} ${cutLabel(link.label || link.url)}`);
   a.href = link.url;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
   a.title = String(link.label || link.url);
   const entry = { link, a, timer: 0 };
-  // iOS öffnet den Link selbst (echter <a>-Link, zuverlässig auch für tel: und Apps); app.js erfährt nur davon
+  // iOS öffnet den Link selbst (echter <a>-Link, zuverlässig auch für tel: und Apps); app.js erfährt nur davon.
+  // Interne Knöpfe („#jarvis-…“: Ja/Nein, Google verbinden) öffnen nichts; app.js handelt synchron im Tippen.
   a.addEventListener("click", () => call("onLinkTap", link));
-  entry.timer = setTimeout(() => removeLink(entry), LINK_MS);
+  const ms = Number(link.ms) > 0 ? Math.min(600000, Number(link.ms)) : LINK_MS;
+  entry.timer = setTimeout(() => removeLink(entry), ms);
   links.push(entry);
   bar.appendChild(a);
   syncLinkClass();
@@ -1052,12 +1114,19 @@ export function clearLinks() {
   while (links.length) removeLink(links[0]);
 }
 
+/** Knöpfe entfernen, deren Adresse mit prefix beginnt (z. B. „#jarvis-ja“ nach der Antwort). */
+export function dropLinks(prefix) {
+  const p = String(prefix || "");
+  for (const l of links.slice()) if (l.link.url.startsWith(p)) removeLink(l);
+}
+
 // ================================================================ Bild (Mac image handler + Bild-Timer)
 let imgTimer = 0, imgLeft = 0, imgStart = 0, imgGen = 0, imgOpen = false;
 function imgHide() {
   clearTimeout(imgTimer);
   imgTimer = 0; imgLeft = 0; imgOpen = false;
   imgGen += 1;
+  body.classList.remove("image-open");
   const box = $("imgview");
   box.className = "";
   box.setAttribute("aria-hidden", "true");
@@ -1072,6 +1141,7 @@ function imgArm(sec) {
 export function showImage({ src, caption } = {}, seconds) {
   if (!src) { imgHide(); return; }
   if (isModelOpen()) hideModel(); // iPhone: immer nur eine Anzeige auf der Bühne
+  hideText();
   const box = $("imgview");
   const img = $("imgview-img");
   const my = ++imgGen;
@@ -1081,6 +1151,7 @@ export function showImage({ src, caption } = {}, seconds) {
     const small = img.naturalWidth < 700 && img.naturalHeight < 700;
     box.className = "show" + (small ? " small" : "");
     box.setAttribute("aria-hidden", "false");
+    body.classList.add("image-open"); // Bild ohne Kasten, leicht durchsichtig: die Kugel tritt dahinter zurück
   };
   img.onerror = () => { if (my === imgGen) imgHide(); };
   img.alt = String(caption || "");
@@ -1113,10 +1184,71 @@ function bindImage() {
 }
 export function isImageOpen() { return imgOpen; }
 
+// ================================================================ Schwebender Text (Mac #textcard, 13.10. abends)
+// „Zeig mir kurz … aus Wikipedia“ (show_text): nur Text, ohne Fläche und Rahmen, über der Kugel; nach 30 s weg,
+// „Text weg“ blendet ihn sofort aus. Handy: liegt oben auf der Bühne, die Kugel tritt solange etwas zurück.
+// foot: eigene Fußzeile statt „Quelle: …“ (Bestätigungskarten: „Gesendet wird erst nach deinem „ja“.“).
+// Passt der Text nicht auf die Bühne (kleines Handy, lange Mail), wird er nie still abgeschnitten: erst Leerzeilen
+// weg, dann die Schrift schrittweise kleiner (bis 14 px), zuletzt scrollbar (fitText, auch bei jeder Größenänderung).
+let textTimer = 0, textOpen = false, textFull = "";
+export function showText({ title = "", text = "", source = "", foot = "", seconds = 30 } = {}) {
+  clearTimeout(textTimer);
+  const body0 = String(text ?? "").trim();
+  if (!body0) { hideText(); return; }
+  if (imgOpen) imgHide();
+  if (isModelOpen()) hideModel();
+  const box = $("textcard");
+  textFull = body0.slice(0, 1600);
+  setText($("textcard-title"), String(title || "").trim().slice(0, 60));
+  setText($("textcard-body"), textFull);
+  const f = String(foot || "").trim().slice(0, 80);
+  setText($("textcard-src"), f || (String(source || "").trim() ? `Quelle: ${String(source).trim().slice(0, 80)}` : ""));
+  box.classList.add("show");
+  box.setAttribute("aria-hidden", "false");
+  box.scrollTop = 0;
+  body.classList.add("text-open");
+  textOpen = true;
+  fitText();
+  const sec = Number(seconds) > 0 ? Math.min(600, Number(seconds)) : 30;
+  textTimer = setTimeout(hideText, sec * 1000);
+}
+function fitText() {
+  const box = $("textcard");
+  if (!box || !box.classList.contains("show")) return;
+  const b = $("textcard-body");
+  const fits = () => box.scrollHeight <= box.clientHeight + 1;
+  b.style.fontSize = "";
+  box.classList.remove("scroll");
+  setText(b, textFull);
+  if (fits()) return;
+  const tight = textFull.replace(/\n[ \t]*\n+/g, "\n");
+  if (tight !== textFull) {
+    setText(b, tight);
+    if (fits()) return;
+  }
+  const base = Math.floor(parseFloat(getComputedStyle(b).fontSize) || 21);
+  for (let px = base - 1; px >= 14; px--) {
+    b.style.fontSize = `${px}px`;
+    if (fits()) return;
+  }
+  box.classList.add("scroll");
+}
+export function hideText() {
+  clearTimeout(textTimer);
+  textTimer = 0;
+  if (!textOpen && !$("textcard").classList.contains("show")) return;
+  textOpen = false;
+  $("textcard").classList.remove("show");
+  $("textcard").setAttribute("aria-hidden", "true");
+  body.classList.remove("text-open");
+}
+export function isTextOpen() { return textOpen; }
+
 // ================================================================ 3D-Modell
 export function showModel(spec) {
   if (!window.Model3D) return;
   if (imgOpen) imgHide();
+  hideText();
   window.Model3D.show(spec);
   $("model3d").setAttribute("aria-hidden", "false");
 }
@@ -1128,10 +1260,22 @@ export function hideModel() {
 export function adjustModel(op) { window.Model3D?.adjust(String(op || "")); }
 export function isModelOpen() { return !!window.Model3D?.isOpen(); }
 
-// ================================================================ Kugel greifen, ziehen, zoomen (live app.js L942-1020, D17)
+// ================================================================ Kugel greifen, ziehen, aufziehen, zoomen
+// Maus wie am Mac (live app.js 13.10. abends): links ziehen = zur Milchstraße langziehen, rechts ziehen = verschieben,
+// Alt + ziehen = eine Kugel herausziehen, Mausrad = aufziehen, Strg/Cmd + Rad = Größe, Klick = zuhören/stoppen (nach
+// 260 ms, damit ein Doppelklick nicht zuhört), Doppelklick = zurück in die Ursprungsform.
+// Finger (Handy-Entscheidung, steht im Hilfe-Blatt): ein Finger ziehen = langziehen/aufziehen, zwei Finger
+// auseinander/zusammen = Größe, zwei Finger gemeinsam ziehen = verschieben, lange drücken und ziehen = eine Kugel
+// herausziehen, antippen = zuhören/stoppen, zweimal tippen = Ursprungsform. Position und Größe bleiben gespeichert
+// (KEYS.orb), Form und Aufzug speichert neuro.js selbst (KEYS.orbForm).
+const TAP_WAIT_MS = 260;       // Mac: so lange wartet ein Klick, ob ein Doppelklick daraus wird
+const LONG_PRESS_MS = 450;     // Handy: so lange drücken, dann hängt die Kugel unter dem Finger daran
+const DRAG_PX = 6;
+const TWO_LOCK_PX = 10;        // zwei Finger: ab so viel Bewegung steht fest, ob gezoomt oder verschoben wird
 let orbDrag = null, orbDragged = false, orbPos = [0, 0], orbZoomV = 1, zoomSaveTimer = 0;
+let tapTimer = 0, pressTimer = 0;
 const touches = new Map();
-let pinchState = null;
+let two = null;                // zwei Finger: { d0, mx, my, lx, ly, z0, ox, oy, mode: null|"pinch"|"move" }
 
 function loadOrb() {
   try {
@@ -1155,7 +1299,7 @@ function orbPlace(x, y, save) {
   const wrap = $("stage-wrap");
   const W = wrap.clientWidth, H = wrap.clientHeight;
   x = Number(x) || 0; y = Number(y) || 0;
-  if (W && H) { // Mitte der Kugel bleibt auf der Bühne (iPhone: nicht über Panels oder Eingabezeile)
+  if (W && H) { // Mitte der Kugel bleibt auf der Bühne (Handy: nicht über Panels oder Eingabezeile)
     const mx = Math.max(0, W / 2 - 24), my = Math.max(0, H / 2 - 24);
     x = clamp(x, -mx, mx); y = clamp(y, -my, my);
   }
@@ -1171,11 +1315,32 @@ function orbScale(z, save) {
   if (save) saveOrb();
 }
 
+function saveZoomSoon() {
+  clearTimeout(zoomSaveTimer);
+  zoomSaveTimer = setTimeout(() => orbScale(orbZoomV, true), 400);
+}
+
 export function orbReset() { orbPlace(0, 0, true); }
 
 export function orbZoom(op) {
   const z = op === "normal" || op === "reset" ? 1 : orbZoomV * (op === "smaller" ? 0.8 : op === "bigger" ? 1.25 : 1);
   orbScale(z, true);
+}
+
+/** „Zeig dein Gehirn als Galaxie“: Form wechseln (ringe, kern, galaxie, netz, schalen); gibt die Form zurück. */
+export function orbShape(name) {
+  if (!orb?.setShape) return "";
+  return orb.setShape(String(name || "ringe"));
+}
+
+/** Doppeltippen / „Form zurück“: Langziehen und Aufziehen zurücksetzen (Mac resetForm). */
+export function orbResetForm() { orb?.resetForm?.(); }
+
+/** Zustand der Kugel (Tests, Anzeige): Form, Aufzug, Position, Größe. */
+export function orbState() {
+  return { shape: orb?.shape || "", open: orb?.openAmount ? Math.round(orb.openAmount() * 1000) / 1000 : 0,
+    openNow: Math.round((orb?.openNow || 0) * 1000) / 1000, sk: orb?.sk ?? 1, spread: orb?.spread ?? 1,
+    x: Math.round(orbPos[0]), y: Math.round(orbPos[1]), zoom: Math.round(orbZoomV * 1000) / 1000 };
 }
 
 // Punkt auf dem Bildschirm → Pixel im Kugel-Canvas (die Bühne ist skaliert, verschoben und gezoomt)
@@ -1184,19 +1349,22 @@ function orbPoint(e) {
   return [(e.clientX - r.left) * (c.width / (r.width || 1)), (e.clientY - r.top) * (c.height / (r.height || 1))];
 }
 
-function pinchSpread() {
+function twoFingers() {
   const [a, b] = [...touches.values()];
-  return Math.hypot(a.x - b.x, a.y - b.y) || 1;
+  return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
 }
 
 // Unten auf der Bühne steht die Telemetrie (KI.KERN / LETZTE ANTWORT): die Kugel samt Zustandsschrift („HÖRE ZU“)
 // bekommt nur den Platz darüber, sonst liegen beide übereinander, sobald die Bühne niedriger als breit ist (visual-ux-1).
+// Die Höhe kommt aus der Telemetrie selbst (am Handy ist sie seit dem Verkleinern niedriger als am Rechner).
 const TELEMETRY_BAND = 36;
 function sizeStage() {
   const wrap = $("stage-wrap");
   const W = wrap.clientWidth, H = wrap.clientHeight;
   if (!W || !H) return;
-  const band = body.classList.contains("focus") ? 0 : TELEMETRY_BAND;
+  const tm = document.querySelector(".telemetry .tm.t3");
+  const tmH = tm && tm.offsetHeight ? Math.ceil(tm.offsetHeight) + 2 : TELEMETRY_BAND;
+  const band = body.classList.contains("focus") ? 0 : tmH;
   const s = Math.max(60, Math.floor(Math.min(W, H - band)));
   const st = $("stage");
   if (st.style.width !== `${s}px` || st.dataset.band !== String(band)) {
@@ -1209,81 +1377,138 @@ function sizeStage() {
   fitPlaceholder();
 }
 
+// Ein Finger / eine Maustaste endet (oder ein zweiter Finger kommt dazu): Kugel loslassen, Aufzug speichern
+function endOne(save = true) {
+  clearTimeout(pressTimer);
+  if (!orbDrag) return;
+  const d = orbDrag;
+  orbDrag = null;
+  const wasNode = d.node >= 0;
+  if (wasNode) orb?.release();
+  orb?.grab(false);
+  $("stage").classList.remove("grabbing");
+  if (!save || !orbDragged || wasNode) return;
+  if (d.move) orbPlace(orbPos[0], orbPos[1], true);
+  else orb?.stretchSave?.();
+}
+
+// Handy: lange gedrückt, ohne zu ziehen → die Kugel unter dem Finger hängt daran
+function longPress() {
+  pressTimer = 0;
+  const d = orbDrag;
+  if (!d || d.mouse || orbDragged || d.node >= 0 || touches.size !== 1 || !orb) return;
+  const c = $("orb"), r = c.getBoundingClientRect();
+  const node = orb.pick(d.cx, d.cy, 16 * (c.width / (r.width || 1)));
+  if (node < 0) return;
+  d.node = node;
+  orbDragged = true; // kein Antippen mehr
+  orb.grab(true);
+  orb.pull(node, d.cx, d.cy);
+  $("stage").classList.add("grabbing");
+  try { navigator.vibrate?.(12); } catch { /* egal */ }
+}
+
+function orbClickTap(e) {
+  if (orbDragged) { orbDragged = false; return; } // war ein Ziehen, kein Antippen
+  if (e.detail >= 2 || tapTimer) { // Doppelklick / zweimal tippen: zurück in die Ursprungsform, nicht zuhören
+    clearTimeout(tapTimer);
+    tapTimer = 0;
+    orbResetForm();
+    return;
+  }
+  // Tastatur (Enter auf der Kugel) oder ein Tippen, das sofort im Finger laufen muss (Tastatur öffnen): ohne Warten
+  if (e.detail === 0 || call("orbTapNow") === true) { call("onOrbTap"); return; }
+  tapTimer = setTimeout(() => { tapTimer = 0; call("onOrbTap"); }, TAP_WAIT_MS);
+}
+
 function bindStage() {
   const stage = $("stage");
+  stage.addEventListener("contextmenu", (e) => e.preventDefault()); // rechts ziehen = verschieben (Mac)
   stage.addEventListener("pointerdown", (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const mouse = e.pointerType === "mouse";
+    if (mouse && e.button !== 0 && e.button !== 2) return;
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { stage.setPointerCapture(e.pointerId); } catch { /* egal */ }
-    if (touches.size === 2) { // zweiter Finger: Kugel zoomen statt ziehen (am Mac: Mausrad)
-      if (orbDrag) {
-        if (orbDrag.node >= 0) orb?.release();
-        orb?.grab(false);
-        orbDrag = null;
-      }
+    if (!mouse && touches.size === 2) { // zweiter Finger: zoomen oder verschieben statt langziehen
+      endOne(true);
       orbDragged = true; // kein Antippen
-      pinchState = { d0: pinchSpread(), z0: orbZoomV };
+      const f = twoFingers();
+      two = { d0: f.d, mx: f.mx, my: f.my, lx: f.mx, ly: f.my, z0: orbZoomV, ox: orbPos[0], oy: orbPos[1], mode: null };
       stage.classList.add("grabbing");
       return;
     }
-    if (touches.size > 2) return;
+    if (touches.size > 1 || two) return;
     const [cx, cy] = orbPoint(e);
-    const node = orb ? orb.pick(cx, cy) : -1; // eine Kugel getroffen: die ziehen, sonst den ganzen Ball
-    orbDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, ox: orbPos[0], oy: orbPos[1], node };
+    const node = mouse && e.altKey && orb ? orb.pick(cx, cy) : -1; // Alt + ziehen: eine Kugel herausziehen
+    orbDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, ox: orbPos[0], oy: orbPos[1],
+      node, move: mouse && e.button === 2, mouse, cx, cy, st: orb?.stretchState ? orb.stretchState() : null };
     orbDragged = false;
+    clearTimeout(pressTimer);
+    if (!mouse) pressTimer = setTimeout(longPress, LONG_PRESS_MS);
   });
   stage.addEventListener("pointermove", (e) => {
     if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pinchState && touches.size >= 2) {
-      orbScale(pinchState.z0 * (pinchSpread() / pinchState.d0), false);
-      clearTimeout(zoomSaveTimer);
-      zoomSaveTimer = setTimeout(() => orbScale(orbZoomV, true), 400);
+    if (two) {
+      if (touches.size < 2) return;
+      const f = twoFingers();
+      const ds = Math.abs(f.d - two.d0), dm = Math.hypot(f.mx - two.mx, f.my - two.my);
+      if (!two.mode && Math.max(ds, dm) > TWO_LOCK_PX) {
+        two.mode = ds >= dm ? "pinch" : "move";
+        if (two.mode === "move") orb?.grab(true);
+      }
+      if (two.mode === "pinch") {
+        orbScale(two.z0 * (f.d / two.d0), false);
+        saveZoomSoon();
+      } else if (two.mode === "move") {
+        orb?.nudge((f.mx - two.lx) * 0.006, (f.my - two.ly) * 0.006);
+        two.lx = f.mx; two.ly = f.my;
+        orbPlace(two.ox + f.mx - two.mx, two.oy + f.my - two.my, false);
+      }
       return;
     }
     if (!orbDrag || orbDrag.id !== e.pointerId) return;
     const dx = e.clientX - orbDrag.x, dy = e.clientY - orbDrag.y;
     orbDrag.x = e.clientX; orbDrag.y = e.clientY;
-    if (!orbDragged && Math.hypot(e.clientX - orbDrag.sx, e.clientY - orbDrag.sy) > 6) {
+    if (!orbDragged && Math.hypot(e.clientX - orbDrag.sx, e.clientY - orbDrag.sy) > DRAG_PX) {
       orbDragged = true;
+      clearTimeout(pressTimer);
       orb?.grab(true);
       stage.classList.add("grabbing");
     }
     if (!orbDragged) return;
     if (orbDrag.node >= 0) { orb?.pull(orbDrag.node, ...orbPoint(e)); return; } // Kugel herausziehen, Netz federt
+    if (!orbDrag.move) { // langziehen/aufziehen: Richtung und Weite vom Startpunkt aus
+      orb?.stretchTo?.(e.clientX - orbDrag.sx, e.clientY - orbDrag.sy, orbDrag.st);
+      return;
+    }
     orb?.nudge(dx * 0.006, dy * 0.006);
     orbPlace(orbDrag.ox + e.clientX - orbDrag.sx, orbDrag.oy + e.clientY - orbDrag.sy, false);
   });
   const release = (e) => {
     touches.delete(e.pointerId);
     try { stage.releasePointerCapture(e.pointerId); } catch { /* egal */ }
-    if (pinchState) {
+    if (two) {
       if (touches.size < 2) {
-        pinchState = null;
+        if (two.mode === "move") { orb?.grab(false); orbPlace(orbPos[0], orbPos[1], true); }
+        if (two.mode === "pinch") orbScale(orbZoomV, true);
+        two = null;
         stage.classList.remove("grabbing");
       }
       return;
     }
     if (!orbDrag || orbDrag.id !== e.pointerId) return;
-    const wasNode = orbDrag.node >= 0;
-    if (wasNode) orb?.release();
-    orbDrag = null;
-    orb?.grab(false);
-    stage.classList.remove("grabbing");
-    if (orbDragged && !wasNode) orbPlace(orbPos[0], orbPos[1], true);
+    endOne(true);
   };
   stage.addEventListener("pointerup", release);
   stage.addEventListener("pointercancel", release);
   stage.addEventListener("lostpointercapture", (e) => { if (touches.has(e.pointerId)) release(e); });
-  stage.addEventListener("wheel", (e) => { // Maus (Tests, iPad mit Trackpad): wie am Mac
+  stage.addEventListener("wheel", (e) => { // Maus/Trackpad wie am Mac
     e.preventDefault();
-    orbScale(orbZoomV * Math.exp(-e.deltaY * 0.001), false);
-    clearTimeout(zoomSaveTimer);
-    zoomSaveTimer = setTimeout(() => orbScale(orbZoomV, true), 400);
+    if (!(e.ctrlKey || e.metaKey) && orb?.unfold) { orb.unfold(Math.exp(-e.deltaY * 0.0012)); return; } // Rad: aufziehen
+    orbScale(orbZoomV * Math.exp(-e.deltaY * 0.001), false); // Strg/Cmd + Rad (und Zwei-Finger-Zoom am Trackpad): Größe
+    saveZoomSoon();
   }, { passive: false });
-  stage.addEventListener("click", () => {
-    if (orbDragged) { orbDragged = false; return; } // war ein Ziehen, kein Antippen
-    call("onOrbTap");
-  });
+  stage.addEventListener("click", orbClickTap);
 }
 
 // ================================================================ Bedienung
